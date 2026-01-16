@@ -52,35 +52,43 @@ class WebsocketPolicyServer:
         await websocket.send(packer.pack(self._metadata))
 
         prev_total_time = None
-        while True:
-            try:
-                start_time = time.monotonic()
-                obs = msgpack_numpy.unpackb(await websocket.recv())
+        try:
+            while True:
+                try:
+                    start_time = time.monotonic()
+                    obs = msgpack_numpy.unpackb(await websocket.recv())
 
-                infer_time = time.monotonic()
-                action = self._policy.infer(obs)
-                infer_time = time.monotonic() - infer_time
+                    infer_time = time.monotonic()
+                    action = self._policy.infer(obs)
+                    infer_time = time.monotonic() - infer_time
 
-                action["server_timing"] = {
-                    "infer_ms": infer_time * 1000,
-                }
-                if prev_total_time is not None:
-                    # We can only record the last total time since we also want to include the send time.
-                    action["server_timing"]["prev_total_ms"] = prev_total_time * 1000
+                    action["server_timing"] = {
+                        "infer_ms": infer_time * 1000,
+                    }
+                    if prev_total_time is not None:
+                        # We can only record the last total time since we also want to include the send time.
+                        action["server_timing"]["prev_total_ms"] = prev_total_time * 1000
 
-                await websocket.send(packer.pack(action))
-                prev_total_time = time.monotonic() - start_time
+                    await websocket.send(packer.pack(action))
+                    prev_total_time = time.monotonic() - start_time
 
-            except websockets.ConnectionClosed:
-                logger.info(f"Connection from {websocket.remote_address} closed")
-                break
-            except Exception:
-                await websocket.send(traceback.format_exc())
-                await websocket.close(
-                    code=websockets.frames.CloseCode.INTERNAL_ERROR,
-                    reason="Internal server error. Traceback included in previous frame.",
-                )
-                raise
+                except websockets.ConnectionClosed:
+                    logger.info(f"Connection from {websocket.remote_address} closed")
+                    break
+                except Exception:
+                    await websocket.send(traceback.format_exc())
+                    await websocket.close(
+                        code=websockets.frames.CloseCode.INTERNAL_ERROR,
+                        reason="Internal server error. Traceback included in previous frame.",
+                    )
+                    raise
+        finally:
+            finalize = getattr(self._policy, "finalize_episode", None)
+            if callable(finalize):
+                try:
+                    finalize()
+                except Exception:
+                    logger.exception("Failed to finalize policy recording on disconnect")
 
 
 def _health_check(connection: _server.ServerConnection, request: _server.Request) -> _server.Response | None:

@@ -1,0 +1,78 @@
+# Franka camera service configuration - Xense test
+# This file configures the camera service with Xense camera
+
+# Robot server configuration
+robot_server:
+  ip: "127.0.0.1"
+  port: 8888
+
+# Recording configuration
+recording:
+  fps: 30.0  # Recording/control frequency in Hz
+
+# Camera configuration
+camera:
+  enable: true  # Enable camera service
+
+  # Realsense cameras configuration
+  realsense_cameras:
+    - camera_serial_number: 'f1422770'
+      camera_type: 'L500'
+      camera_name: 'l500_camera'
+      rgb_resolution: [960, 540]
+      depth_resolution: [640, 480]
+      fps: 30
+      exposure: 550  # null for auto exposure
+      white_balance: 5900  # null for auto white balance
+      decimate: 1  # (0-4) decimation filter magnitude
+
+  # Xense cameras configuration
+  xense_cameras:
+    - camera_index: 'OG000048'
+      camera_name: 'xense_camera_1'
+
+    - camera_index: 'OG000235'
+      camera_name: 'xense_camera_2'
+
+  # Camera service configuration
+  camera_service:
+    host: "0.0.0.0"  # Listen on all interfaces
+    port: 5050  # TCP port for camera service
+    poll_hz: 30.0  # Frame polling frequency (0 = on-demand only)
+    convert_bgr: true  # Convert BGR to RGB in output
+
+    # Camera selection - using Xense camera for d400 slot
+    l500_name: 'l500_camera'  # Name of L500 camera to use
+    d400_name: 'xense_camera_1'  # Name of Xense camera to use
+    d400_kind: 'xense'  # 'realsense' or 'xense'
+
+    # Output frame keys
+    l500_key: 'l500_rgb'  # Key for L500 frame in response
+    d400_key: 'd400_rgb'  # Key for D400/Xense frame in response
+
+# Evaluation configuration (for eval scripts)
+evaluation:
+  camera_host: "127.0.0.1"  # Camera service host for client
+  camera_port: 5050  # Camera service port for client
+  camera_timeout_s: 0.1  # Timeout for camera requests
+
+  # Image dimensions (must match training)
+  image_height: 224
+  image_width: 224
+
+  # Episode settings
+  max_episode_time: 30.0
+  num_episodes: 10
+
+  # Workspace bounds (meters)
+  workspace_bounds:
+    min: [0.2, -0.5, 0.0]  # min x, y, z
+    max: [0.8, 0.5, 0.6]   # max x, y, z
+
+  # Control parameters
+  max_pos_speed: 0.5  # Maximum TCP speed (m/s)
+  gripper_open: 1.0
+  gripper_close: 0.0
+
+  # Default prompt
+  default_prompt: "open the can with the screwdriver"

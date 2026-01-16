@@ -28,6 +28,7 @@ class Runtime:
 
         self._in_episode = False
         self._episode_steps = 0
+        self._episode_index = -1
 
     def run(self) -> None:
         """Runs the runtime loop continuously until stop() is called or the environment is done."""
@@ -57,6 +58,7 @@ class Runtime:
 
         self._in_episode = True
         self._episode_steps = 0
+        self._episode_index += 1
         step_time = 1 / self._max_hz if self._max_hz > 0 else 0
         last_step_time = time.time()
 
@@ -80,7 +82,8 @@ class Runtime:
     def _step(self) -> None:
         """A single step of the runtime loop."""
         observation = self._environment.get_observation()
-        action = self._agent.get_action(observation)
+        observation_for_agent = self._augment_observation(observation)
+        action = self._agent.get_action(observation_for_agent)
         self._environment.apply_action(action)
 
         for subscriber in self._subscribers:
@@ -90,3 +93,15 @@ class Runtime:
             self._max_episode_steps > 0 and self._episode_steps >= self._max_episode_steps
         ):
             self.mark_episode_complete()
+
+    def _augment_observation(self, observation: dict) -> dict:
+        """Attach episode metadata for downstream consumers (e.g., recorders)."""
+        meta = {}
+        existing_meta = observation.get("__openpi")
+        if isinstance(existing_meta, dict):
+            meta.update(existing_meta)
+        meta["episode_index"] = self._episode_index
+        meta["episode_step"] = self._episode_steps
+        augmented = dict(observation)
+        augmented["__openpi"] = meta
+        return augmented
