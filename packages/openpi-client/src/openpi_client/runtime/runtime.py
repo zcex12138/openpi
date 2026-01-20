@@ -85,7 +85,6 @@ class Runtime:
         observation_for_agent = self._augment_observation(observation)
         action = self._agent.get_action(observation_for_agent)
         self._environment.apply_action(action)
-
         for subscriber in self._subscribers:
             subscriber.on_step(observation, action)
 

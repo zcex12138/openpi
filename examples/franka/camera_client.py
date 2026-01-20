@@ -64,11 +64,6 @@ class CameraClient:
             "l500_rgb": _decode_frame(frames.get("l500_rgb")),
             "d400_rgb": _decode_frame(frames.get("d400_rgb")),
         }
-        # 2.0x downsampling
-        # downsampled = {
-        #     key: cv2.resize(img, None, fx=0.5, fy=0.5, interpolation=cv2.INTER_AREA)
-        #     for key, img in decoded.items()
-        # }
         return decoded, int(response.get("timestamp_ns", 0)), int(response.get("seq", 0))
 
     def get_frames_resized(self, height: int=224, width: int=224) -> tuple[dict[str, np.ndarray], int, int]:
@@ -77,7 +72,7 @@ class CameraClient:
         resized = {key: _resize_frame_cv2(img, height=height, width=width) for key, img in frames.items()}
         return resized, timestamp_ns, seq
 
-    def __enter__(self) -> "CameraClient":
+    def __enter__(self) -> CameraClient:
         return self
 
     def __exit__(self, exc_type, exc, tb) -> None:

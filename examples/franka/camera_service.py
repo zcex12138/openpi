@@ -10,17 +10,17 @@ import argparse
 import importlib
 import json
 import logging
+from pathlib import Path
 import signal
 import socketserver
 import threading
 import time
-from pathlib import Path
 from typing import Any
 
 import numpy as np
-import yaml
 
 from examples.franka import ipc
+from examples.franka.utils import load_yaml_config
 
 logger = logging.getLogger(__name__)
 
@@ -168,8 +168,8 @@ class SimpleRealsenseCamera:
         if self._pipeline is not None:
             try:
                 self._pipeline.stop()
-            except Exception:
-                pass
+            except (RuntimeError, OSError) as exc:
+                logger.debug("Failed to stop RealSense pipeline: %s", exc)
             self._pipeline = None
         logger.info("RealSense camera %s stopped", self.camera_serial_number)
 
@@ -212,16 +212,16 @@ class SimpleRealsenseCamera:
             if not self._options_set:
                 try:
                     self._color_sensor.set_option(rs.option.global_time_enabled, 1)
-                except Exception:
-                    pass
+                except (RuntimeError, OSError) as exc:
+                    logger.debug("Failed to set global_time_enabled: %s", exc)
                 try:
                     self._set_exposure(exposure=self.exposure, gain=0)
-                except Exception:
-                    pass
+                except (RuntimeError, OSError) as exc:
+                    logger.debug("Failed to set exposure: %s", exc)
                 try:
                     self._set_white_balance(white_balance=self.white_balance)
-                except Exception:
-                    pass
+                except (RuntimeError, OSError) as exc:
+                    logger.debug("Failed to set white_balance: %s", exc)
                 self._options_set = True
 
             # Convert to numpy array
@@ -341,19 +341,6 @@ class DualCameraProvider:
         """Stop both cameras."""
         self._l500.stop()
         self._d400.stop()
-
-
-def _load_yaml_config(path: str) -> dict[str, Any]:
-    config_path = Path(path)
-    if not config_path.exists():
-        raise FileNotFoundError(f"Config file not found: {config_path}")
-    with config_path.open("r", encoding="utf-8") as handle:
-        data = yaml.safe_load(handle)
-    if data is None:
-        return {}
-    if not isinstance(data, dict):
-        raise ValueError("Config file must contain a YAML mapping at the top level")
-    return data
 
 
 def _get_service_config(config: dict[str, Any]) -> dict[str, Any]:
@@ -637,7 +624,7 @@ def main() -> None:
     config: dict[str, Any] = {}
     service_cfg: dict[str, Any] = {}
     if args.config is not None:
-        config = _load_yaml_config(args.config)
+        config = load_yaml_config(args.config)
         service_cfg = _get_service_config(config)
 
     if args.provider is not None:

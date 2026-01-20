@@ -100,7 +100,7 @@ class FrankaEnvironment(_environment.Environment):
 
         # Get camera frames
         try:
-            frames, _timestamp_ns, seq = self._camera.get_frames_resized()
+            frames, _timestamp_ns, seq = self._camera.get_frames()
             l500_image = frames["l500_rgb"]
             d400_image = frames["d400_rgb"]
             if self._last_frame_seq is not None and seq == self._last_frame_seq:
@@ -144,7 +144,11 @@ class FrankaEnvironment(_environment.Environment):
         if actions.ndim == 2:
             actions = actions[0]
 
-        self._real_env.execute_action(actions)
+        elapsed = time.time() - self._episode_start_time
+        print(f"[openpi] step={self._step_count} t={elapsed:.3f}s", flush=True)
+
+        executed_action = self._real_env.execute_action(actions)
+        action["executed_action"] = executed_action
         self._step_count += 1
 
     @property

@@ -4,22 +4,23 @@ This script connects to the Franka robot and displays real-time plots of
 the TCP wrench (6D: fx, fy, fz, tx, ty, tz) using matplotlib.
 
 Usage:
-    uv run examples/franka/visualize_wrench.py [--robot-ip IP] [--robot-port PORT]
+    uv run examples/franka/visualize_wrench.py [--robot-ip IP]
 """
 
 from __future__ import annotations
 
 import argparse
+from collections import deque
 import logging
 import signal
 import sys
-from collections import deque
 
+from frankx import Robot
+from matplotlib.animation import FuncAnimation
 import matplotlib.pyplot as plt
 import numpy as np
-from matplotlib.animation import FuncAnimation
 
-import constants
+from examples.franka import constants
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -37,7 +38,6 @@ class WrenchVisualizer:
     def __init__(
         self,
         robot_ip: str = constants.ROBOT_IP,
-        robot_port: int = constants.ROBOT_PORT,
         window_sec: float = 10.0,
         fps: float = 30.0,
     ) -> None:
@@ -45,12 +45,10 @@ class WrenchVisualizer:
 
         Args:
             robot_ip: IP address of the robot controller.
-            robot_port: Port of the robot controller.
             window_sec: Time window to display in seconds.
             fps: Target update frequency in Hz.
         """
         self._robot_ip = robot_ip
-        self._robot_port = robot_port
         self._window_sec = window_sec
         self._fps = fps
         self._dt = 1.0 / fps
@@ -101,10 +99,11 @@ class WrenchVisualizer:
 
     def connect(self) -> None:
         """Connect to the Franka robot."""
-        from robot_client import RobotClient
-
-        logger.info("Connecting to Franka robot at %s:%s", self._robot_ip, self._robot_port)
-        self._client = RobotClient(self._robot_ip, self._robot_port)
+        logger.info("Connecting to Franka robot at %s", self._robot_ip)
+        self._client = Robot(self._robot_ip)
+        self._client.set_default_behavior()
+        self._client.recover_from_errors()
+        self._client.set_EE(constants.DEFAULT_EE_TRANSFORM)
         logger.info("Connected to Franka robot")
 
     def disconnect(self) -> None:
@@ -123,10 +122,7 @@ class WrenchVisualizer:
 
         try:
             state = self._client.get_state()
-            if state is None:
-                return None
-            _joint_angles, _position, _quaternion, force, _velocity = state
-            return np.asarray(force, dtype=np.float32)
+            return np.asarray(state.O_F_ext_hat_K, dtype=np.float32)
         except Exception as e:
             logger.warning("Failed to get robot state: %s", e)
             return None
@@ -237,12 +233,6 @@ def main():
         help=f"Robot controller IP address (default: {constants.ROBOT_IP})",
     )
     parser.add_argument(
-        "--robot-port",
-        type=int,
-        default=constants.ROBOT_PORT,
-        help=f"Robot controller port (default: {constants.ROBOT_PORT})",
-    )
-    parser.add_argument(
         "--window",
         type=float,
         default=10.0,
@@ -258,7 +248,6 @@ def main():
 
     visualizer = WrenchVisualizer(
         robot_ip=args.robot_ip,
-        robot_port=args.robot_port,
         window_sec=args.window,
         fps=args.fps,
     )

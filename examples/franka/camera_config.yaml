@@ -1,14 +1,6 @@
 # Franka camera service configuration
-# This file configures the camera service for Franka robot evaluation
-
-# Robot server configuration
-robot_server:
-  ip: "127.0.0.1"
-  port: 8888
-
-# Recording configuration
-recording:
-  fps: 30.0  # Recording/control frequency in Hz
+# This file contains ONLY camera-related configuration.
+# Robot control parameters are in real_env_config.yaml.
 
 # Camera configuration
 camera:
@@ -53,36 +45,26 @@ camera:
 
     # Camera selection (match by name or type)
     l500_name: 'l500_camera'  # Name of L500 camera to use
+
+    # D400/wrist camera selection - Default: RealSense D400
     d400_name: 'd400_camera'  # Name of D400/Xense camera to use
     d400_kind: 'realsense'  # 'realsense' or 'xense'
+
+    # Alternative: Xense camera (uncomment below and comment above)
+    # d400_name: 'xense_camera_1'
+    # d400_kind: 'xense'
 
     # Output frame keys
     l500_key: 'l500_rgb'  # Key for L500 frame in response
     d400_key: 'd400_rgb'  # Key for D400/Xense frame in response
 
-# Evaluation configuration (for eval scripts)
-evaluation:
-  camera_host: "127.0.0.1"  # Camera service host for client
-  camera_port: 5050  # Camera service port for client
-  camera_timeout_s: 0.1  # Timeout for camera requests
+# Camera client configuration (for evaluation scripts)
+camera_client:
+  host: "127.0.0.1"  # Camera service host for client
+  port: 5050  # Camera service port for client
+  timeout_s: 0.1  # Timeout for camera requests
 
-  # Image dimensions (must match training)
-  image_height: 224
-  image_width: 224
-
-  # Episode settings
-  max_episode_time: 30.0
-  num_episodes: 10
-
-  # Workspace bounds (meters)
-  workspace_bounds:
-    min: [0.2, -0.5, 0.0]  # min x, y, z
-    max: [0.8, 0.5, 0.6]   # max x, y, z
-
-  # Control parameters
-  max_pos_speed: 0.5  # Maximum TCP speed (m/s)
-  gripper_open: 1.0
-  gripper_close: 0.0
-
-  # Default prompt
-  default_prompt: "open the can with the screwdriver"
+# Image dimensions (must match training)
+image:
+  height: 224
+  width: 224

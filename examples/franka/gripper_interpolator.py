@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import time
-from typing import Optional
 
 
 class GripperStateInterpolator:
@@ -13,7 +12,7 @@ class GripperStateInterpolator:
         self.interpolation_duration = interpolation_duration
         self._target_state: float = 0.0
         self._state_before_change: float = 0.0
-        self._change_time: Optional[float] = None
+        self._change_time: float | None = None
         self._early_terminated: bool = False
 
     def set_target(self, target: float, current_time: float) -> None:

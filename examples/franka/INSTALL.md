@@ -7,8 +7,8 @@ uv pip install nvidia-cuda-runtime-cu11
 uv pip install onnxruntime-gpu==1.18.0
 pip install xensesdk==1.6.0 -i https://repo.huaweicloud.com/repository/pypi/simple/
 
-# franka controller
-cd ~/workspace/yhx/franka_control
+# frankx
+cd ~/workspace/yhx/frankx
 source /home/mpi/workspace/yhx/openpi/examples/franka/.venv/bin/activate
 uv pip install -e .
 

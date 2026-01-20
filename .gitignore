@@ -168,11 +168,14 @@ cython_debug/
 #.idea/
 
 # AI
-AGENTS.md
-CLAUDE.md
-openspec
-.vscode
-.serena
+# AGENTS.md
+# CLAUDE.md
+# openspec
 .claude
+.vscode
+# .serena
+
+# data
+.hf_datasets
 policy_records
 数据上传.txt

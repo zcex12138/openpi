@@ -6,8 +6,9 @@ import argparse
 import time
 
 import cv2
-from examples.franka.camera_client import CameraClient
 from xensesdk.ezgl.utils.QtTools import qtcv
+
+from examples.franka.camera_client import CameraClient
 
 
 def main():

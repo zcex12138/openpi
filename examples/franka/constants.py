@@ -1,6 +1,9 @@
 """Constants for Franka robot evaluation.
 
-Values can be loaded from camera_config.yaml if available, otherwise defaults are used.
+This module provides:
+- Fixed constants (ACTION_DIM, STATE_DIM)
+- Camera-related constants loaded from camera_config.yaml
+- Robot-related constants loaded from real_env_config.yaml
 """
 
 from __future__ import annotations
@@ -9,108 +12,124 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-import yaml
 
-# Path to default config file
-_CONFIG_FILE = Path(__file__).parent / "camera_config.yaml"
+from examples.franka.utils import get_nested
+from examples.franka.utils import load_yaml_config
+
+# Path to config files
+_CAMERA_CONFIG_FILE = Path(__file__).parent / "camera_config.yaml"
+_REAL_ENV_CONFIG_FILE = Path(__file__).parent / "real_env_config.yaml"
 
 # Cached config data
-_config: dict[str, Any] | None = None
+_camera_config: dict[str, Any] | None = None
+_real_env_config: dict[str, Any] | None = None
 
 
-def _load_config() -> dict[str, Any]:
-    """Load configuration from YAML file."""
-    global _config
-    if _config is None:
-        if _CONFIG_FILE.exists():
-            with _CONFIG_FILE.open("r", encoding="utf-8") as f:
-                _config = yaml.safe_load(f) or {}
-        else:
-            _config = {}
-    return _config or {}
+def _load_camera_config() -> dict[str, Any]:
+    """Load camera configuration from YAML file."""
+    global _camera_config
+    if _camera_config is None:
+        _camera_config = load_yaml_config(_CAMERA_CONFIG_FILE)
+    return _camera_config or {}
 
 
-def _get_nested(keys: list[str], default: Any) -> Any:
-    """Get nested value from config or return default."""
-    cfg = _load_config()
-    for key in keys:
-        if isinstance(cfg, dict) and key in cfg:
-            cfg = cfg[key]
-        else:
-            return default
-    return cfg
+def _load_real_env_config() -> dict[str, Any]:
+    """Load real_env configuration from YAML file."""
+    global _real_env_config
+    if _real_env_config is None:
+        _real_env_config = load_yaml_config(_REAL_ENV_CONFIG_FILE)
+    return _real_env_config or {}
+
+
+def _get_camera_nested(keys: list[str], default: Any) -> Any:
+    """Get nested value from camera config or return default."""
+    return get_nested(_load_camera_config(), keys, default)
+
+
+def _get_env_nested(keys: list[str], default: Any) -> Any:
+    """Get nested value from real_env config or return default."""
+    return get_nested(_load_real_env_config(), keys, default)
 
 
 def reload_config(config_path: str | Path | None = None) -> None:
-    """Reload configuration from a specific file or default location.
+    """Reload camera configuration from a specific file or default location.
 
     Args:
         config_path: Path to config file. If None, uses default location.
     """
-    global _config, _CONFIG_FILE
+    global _camera_config, _CAMERA_CONFIG_FILE
     if config_path is not None:
-        _CONFIG_FILE = Path(config_path)
-    _config = None
-    _load_config()
+        _CAMERA_CONFIG_FILE = Path(config_path)
+    _camera_config = None
+    _load_camera_config()
 
 
-# Robot connection
-ROBOT_IP: str = _get_nested(["robot_server", "ip"], "127.0.0.1")
-ROBOT_PORT: int = _get_nested(["robot_server", "port"], 8888)
+def reload_real_env_config(config_path: str | Path | None = None) -> None:
+    """Reload real_env configuration from a specific file or default location.
 
-# Control parameters
-CONTROL_FPS: float = _get_nested(["recording", "fps"], 30.0)
-DT: float = 1.0 / CONTROL_FPS
+    Args:
+        config_path: Path to config file. If None, uses default location.
+    """
+    global _real_env_config, _REAL_ENV_CONFIG_FILE
+    if config_path is not None:
+        _REAL_ENV_CONFIG_FILE = Path(config_path)
+    _real_env_config = None
+    _load_real_env_config()
+
+
+# =============================================================================
+# Fixed constants (not from config)
+# =============================================================================
 
 # Action dimensions
 # action: [x, y, z, qw, qx, qy, qz, gripper]
 ACTION_DIM: int = 8
-STATE_DIM: int = 14  # TCP pose (7) + additional state (7)
 
-# Workspace bounds (m)
-_ws_min = _get_nested(["evaluation", "workspace_bounds", "min"], [0.2, -0.5, 0.0])
-_ws_max = _get_nested(["evaluation", "workspace_bounds", "max"], [0.8, 0.5, 0.6])
+# State dimensions
+# state: [TCP pose (7D) + gripper (1D) + wrench (6D)]
+STATE_DIM: int = 14
+
+
+# =============================================================================
+# Camera constants (from camera_config.yaml)
+# =============================================================================
+
+# Camera service client
+CAMERA_HOST: str = _get_camera_nested(["camera_client", "host"], "127.0.0.1")
+CAMERA_PORT: int = _get_camera_nested(["camera_client", "port"], 5050)
+CAMERA_TIMEOUT_S: float = _get_camera_nested(["camera_client", "timeout_s"], 0.1)
+
+# Image dimensions (must match training)
+IMAGE_HEIGHT: int = _get_camera_nested(["image", "height"], 224)
+IMAGE_WIDTH: int = _get_camera_nested(["image", "width"], 224)
+
+
+# =============================================================================
+# Robot constants (from real_env_config.yaml)
+# =============================================================================
+
+# Robot connection
+ROBOT_IP: str = _get_env_nested(["robot", "ip"], "172.16.0.2")
+
+# Workspace bounds (meters)
+_DEFAULT_WS_MIN = [0.2, -0.5, 0.0]
+_DEFAULT_WS_MAX = [0.8, 0.5, 0.6]
+_ws_min = _get_env_nested(["workspace_bounds", "min"], _DEFAULT_WS_MIN)
+_ws_max = _get_env_nested(["workspace_bounds", "max"], _DEFAULT_WS_MAX)
 WORKSPACE_BOUNDS: tuple[np.ndarray, np.ndarray] = (
     np.array(_ws_min, dtype=np.float32),
     np.array(_ws_max, dtype=np.float32),
 )
 
-# Maximum TCP speed (m/s)
-MAX_POS_SPEED: float = _get_nested(["evaluation", "max_pos_speed"], 0.5)
+# End-effector transform (NE_T_EE) - 4x4 row-major matrix flattened to 16 elements
+_DEFAULT_EE_TRANSFORM = [
+    1.0, 0.0, 0.0, 0.0,
+    0.0, 1.0, 0.0, 0.0,
+    0.0, 0.0, 1.0, 0.0,
+    0.0, 0.0, 0.0, 1.0,
+]
+DEFAULT_EE_TRANSFORM: list[float] = _get_env_nested(["ee_transform"], _DEFAULT_EE_TRANSFORM)
 
-# Gripper
-GRIPPER_OPEN: float = _get_nested(["evaluation", "gripper_open"], 1.0)
-GRIPPER_CLOSE: float = _get_nested(["evaluation", "gripper_close"], 0.0)
-
-# Camera service
-CAMERA_HOST: str = _get_nested(["evaluation", "camera_host"], "127.0.0.1")
-CAMERA_PORT: int = _get_nested(["evaluation", "camera_port"], 5050)
-CAMERA_TIMEOUT_S: float = _get_nested(["evaluation", "camera_timeout_s"], 0.1)
-
-# Image dimensions (must match training)
-IMAGE_HEIGHT: int = _get_nested(["evaluation", "image_height"], 224)
-IMAGE_WIDTH: int = _get_nested(["evaluation", "image_width"], 224)
-
-# Episode defaults
-MAX_EPISODE_TIME: float = _get_nested(["evaluation", "max_episode_time"], 30.0)
-NUM_EPISODES: int = _get_nested(["evaluation", "num_episodes"], 10)
-
-# Default prompt
-DEFAULT_PROMPT: str = _get_nested(["evaluation", "default_prompt"], "open the can with the screwdriver")
-
-# Robot reset parameters
-# Default joint position for reset (7 joint angles in radians)
-_default_joint = _get_nested(
-    ["evaluation", "default_joint_position"],
-    [-0.26134401, 0.46399827, -0.02856101, -2.23260865, -0.00302741, 2.67803179, 0.5054156],
-)
-DEFAULT_JOINT_POSITION: np.ndarray = np.array(_default_joint, dtype=np.float64)
-
-# Move speed factor for joint motion (0.0-1.0)
-DEFAULT_MOVE_SPEED_FACTOR: float = _get_nested(["evaluation", "move_speed_factor"], 0.3)
-
-# Gripper parameters for grasping
-GRIPPER_OPEN_WIDTH: float = _get_nested(["evaluation", "gripper_open_width"], 0.078)  # meters
-GRIPPER_GRASP_WIDTH: float = _get_nested(["evaluation", "gripper_grasp_width"], 0.015)  # meters
-GRIPPER_VELOCITY: float = _get_nested(["evaluation", "gripper_velocity"], 0.1)  # m/s
-GRIPPER_FORCE: float = _get_nested(["evaluation", "gripper_force"], 30.0)  # Newtons
+# Evaluation parameters
+MAX_EPISODE_TIME: float = _get_env_nested(["evaluation", "max_episode_time"], 30.0)
+DEFAULT_PROMPT: str = _get_env_nested(["evaluation", "default_prompt"], "open the can with the screwdriver")

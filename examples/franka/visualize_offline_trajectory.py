@@ -8,16 +8,17 @@ Usage:
 from __future__ import annotations
 
 import argparse
+from collections.abc import Iterable
 import logging
-import sys
 from pathlib import Path
-from typing import Iterable
+import sys
 
 import matplotlib.pyplot as plt
-import numpy as np
 from matplotlib.widgets import Slider
+import numpy as np
 
-import constants
+from examples.franka import constants
+from examples.franka.utils import quat_to_rotmat as _quat_to_rotmat
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -85,28 +86,14 @@ def _as_float_array(value: Iterable[float], *, size: int) -> np.ndarray:
     return arr[:size]
 
 
-def _quat_to_rotmat(quat: Iterable[float]) -> np.ndarray:
+def _quat_to_rotmat_with_nan(quat: Iterable[float]) -> np.ndarray:
+    """Convert quaternion to rotation matrix, returning NaN matrix for NaN inputs."""
     q = np.asarray(quat, dtype=np.float64).reshape(-1)
     if q.size < 4:
         raise ValueError(f"Expected quaternion with 4 elements, got {q.size}")
-
     if np.any(np.isnan(q[:4])):
         return np.full((3, 3), np.nan, dtype=np.float64)
-
-    q = q[:4]
-    norm = np.linalg.norm(q)
-    if norm < 1e-9:
-        return np.eye(3, dtype=np.float64)
-
-    w, x, y, z = q / norm
-    return np.array(
-        [
-            [1.0 - 2.0 * (y * y + z * z), 2.0 * (x * y - z * w), 2.0 * (x * z + y * w)],
-            [2.0 * (x * y + z * w), 1.0 - 2.0 * (x * x + z * z), 2.0 * (y * z - x * w)],
-            [2.0 * (x * z - y * w), 2.0 * (y * z + x * w), 1.0 - 2.0 * (x * x + y * y)],
-        ],
-        dtype=np.float64,
-    )
+    return _quat_to_rotmat(q[:4])
 
 
 def _extract_poses(
@@ -379,7 +366,7 @@ def main() -> None:
 
         # TCP frame
         if not np.isnan(tcp_positions[idx]).any() and not np.isnan(tcp_quats[idx]).any():
-            tcp_rot = _quat_to_rotmat(tcp_quats[idx])
+            tcp_rot = _quat_to_rotmat_with_nan(tcp_quats[idx])
             if not np.isnan(tcp_rot).any():
                 _update_frame_lines(
                     tcp_frame_lines,
@@ -399,7 +386,7 @@ def main() -> None:
             if np.isnan(pose).any() or np.isnan(quat).any():
                 _clear_frame_lines(lines)
                 continue
-            rot = _quat_to_rotmat(quat)
+            rot = _quat_to_rotmat_with_nan(quat)
             if np.isnan(rot).any():
                 _clear_frame_lines(lines)
                 continue

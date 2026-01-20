@@ -1,0 +1,67 @@
+# Franka real_env configuration
+# All robot control and evaluation parameters are loaded from this file.
+# Camera configuration is in camera_config.yaml.
+
+# Robot connection
+robot:
+  ip: "172.16.0.2"  # Franka robot FCI IP address
+
+# Control configuration
+control:
+  mode: "impedance"  # Control mode: "impedance" or "cartesian"
+  fps: 30.0  # Control frequency in Hz
+
+# Workspace bounds (meters)
+workspace_bounds:
+  min: [0.2, -0.5, 0.0]  # min x, y, z
+  max: [0.8, 0.5, 0.6]   # max x, y, z
+
+# Motion limits
+motion:
+  max_pos_speed: 0.5  # Maximum TCP speed (m/s)
+
+# Impedance control parameters (only used when control.mode = "impedance")
+impedance:
+  translational_stiffness: 1400.0  # Translational stiffness (N/m)
+  rotational_stiffness: 80.0       # Rotational stiffness (Nm/rad)
+
+# Cartesian control parameters (only used when control.mode = "cartesian")
+cartesian:
+  velocity_factor: 0.05  # Velocity factor for cartesian waypoint motion (0.0-1.0)
+
+# Action smoothing
+smoothing:
+  alpha: 0.5  # EMA filter alpha (0.0=no smoothing, 0.5=moderate, 0.9=heavy)
+
+# Gripper configuration
+gripper:
+  interpolation_duration: 1.4  # Duration for gripper state interpolation (seconds)
+  command_interval: 1.5        # Minimum interval between gripper commands (seconds)
+  open_width: 0.078            # Gripper open width (meters)
+  grasp_width: 0.015           # Gripper grasp width (meters)
+  velocity: 0.1                # Gripper velocity (m/s)
+  force: 30.0                  # Gripper grasp force (Newtons)
+  close_threshold: 0.7         # Threshold for closing gripper (action value)
+  open_threshold: 0.3          # Threshold for opening gripper (action value)
+
+# Robot reset parameters
+reset:
+  auto_on_disconnect: true  # Auto reset robot on disconnect
+  # Default joint position for reset (7 joint angles in radians)
+  default_joint_position: [-0.26134401, 0.46399827, -0.02856101, -2.23260865, -0.00302741, 2.67803179, 0.5054156]
+  move_speed_factor: 0.3    # Speed factor for joint motion (0.0-1.0)
+
+# End-effector transform (NE_T_EE) - 4x4 row-major matrix
+# Identity matrix by default to match training pose conventions
+ee_transform: [
+  1.0, 0.0, 0.0, 0.0,
+  0.0, 1.0, 0.0, 0.0,
+  0.0, 0.0, 1.0, 0.0,
+  0.0, 0.0, 0.0, 1.0
+]
+
+# Evaluation parameters
+evaluation:
+  max_episode_time: 30.0  # Maximum episode duration (seconds)
+  num_episodes: 10        # Default number of evaluation episodes
+  default_prompt: "open the can with the screwdriver"  # Default task prompt

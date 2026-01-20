@@ -215,6 +215,7 @@ class PolicyRecorder(_base_policy.BasePolicy):
         self._record_dir.mkdir(parents=True, exist_ok=True)
         self._episode_records: list[dict[str, Any]] = []
         self._episode_index: int | None = None
+        self._source_episode_index: int | None = None
         self._episode_dir: pathlib.Path | None = None
         self._episode_record_path: pathlib.Path | None = None
         self._episode_index_offset: int | None = None
@@ -441,6 +442,7 @@ class PolicyRecorder(_base_policy.BasePolicy):
         """Finalize the current episode recording (used when sessions end)."""
         self._finalize_episode_video()
         self._episode_index = None
+        self._source_episode_index = None
 
     @override
     def infer(self, obs: dict) -> dict:  # type: ignore[misc]
@@ -458,9 +460,14 @@ class PolicyRecorder(_base_policy.BasePolicy):
         episode_index, _ = self._get_episode_info(obs)
         if episode_index is None:
             episode_index = 0
-        if self._episode_index_offset is None:
+        if (
+            self._episode_index_offset is None
+            or self._episode_index is None
+            or self._source_episode_index != episode_index
+        ):
             next_index = self._get_next_episode_index()
             self._episode_index_offset = next_index - episode_index
+            self._source_episode_index = episode_index
         episode_index += self._episode_index_offset
         self._ensure_episode(episode_index)
 

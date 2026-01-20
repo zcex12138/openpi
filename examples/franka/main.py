@@ -1,21 +1,35 @@
 """Main entry point for Franka robot evaluation.
 
 Usage:
-    # Local inference (default)
+    # Local inference with impedance control (default)
     uv run examples/franka/main.py --checkpoint-dir ./checkpoints/11999 --config pi05_franka_screwdriver_lora
+
+    # Local inference with position control (using shifted-state-to-action config)
+    uv run examples/franka/main.py \\
+        --checkpoint-dir ./checkpoints/pi05_franka_position_control_lora/11999 \\
+        --config pi05_franka_position_control_lora \\
+        --control-mode cartesian \\
+        --cartesian-velocity-factor 0.05
 
     # Remote inference (policy server mode)
     uv run examples/franka/main.py --remote-host 0.0.0.0 --remote-port 8000
+
+Control modes:
+    - impedance: Default mode, uses impedance control with delta actions
+    - cartesian: Cartesian position control, suitable for position control configs
+                 (e.g., pi05_franka_position_control_lora)
+
+Safety tips for position control:
+    - Start with low velocity factor (0.01-0.03) for initial testing
+    - Increase gradually to 0.05-0.1 once behavior is verified
+    - Keep emergency stop button ready
 """
 
 from __future__ import annotations
 
-import csv
 import dataclasses
 import logging
-import pathlib
 import time
-from typing import Any
 
 import numpy as np
 from openpi_client import action_chunk_broker
@@ -31,6 +45,9 @@ from examples.franka import real_env as _real_env
 
 logger = logging.getLogger(__name__)
 
+# Load default config for evaluation parameter defaults
+_default_config = _real_env.RealEnvConfig.from_yaml()
+
 
 @dataclasses.dataclass
 class Args:
@@ -40,26 +57,26 @@ class Args:
     checkpoint_dir: str | None = None
     config: str | None = None
 
-    # Robot connection
-    robot_ip: str = constants.ROBOT_IP
-    robot_port: int = constants.ROBOT_PORT
+    # Real environment config file
+    real_env_config: str | None = None  # Path to real_env_config.yaml (None = use default)
 
-    # Control parameters
-    control_fps: float = constants.CONTROL_FPS
+    # Robot connection (can override config file)
+    robot_ip: str | None = None
+
+    # Control parameters (can override config file)
+    control_mode: str | None = None  # "impedance" or "cartesian"
+    control_fps: float | None = None
     open_loop_horizon: int | None = None  # None = use model action_horizon
-    max_episode_time: float = constants.MAX_EPISODE_TIME
-    num_episodes: int = constants.NUM_EPISODES
+    max_episode_time: float = _default_config.max_episode_time
+    num_episodes: int = _default_config.num_episodes
+    action_smoothing_alpha: float | None = None  # None=use config, 0.0=no smoothing, 0.9=heavy
+    cartesian_velocity_factor: float | None = None  # Velocity factor for cartesian mode
 
     # Task
-    prompt: str = constants.DEFAULT_PROMPT
+    prompt: str = _default_config.default_prompt
 
-    # Safety
-    max_pos_speed: float = constants.MAX_POS_SPEED
-
-    # Output
-    save_video: bool = False  # Video saving not implemented yet
-    output_dir: str = "./eval_results"
-    save_summary: bool = True
+    # Safety (can override config file)
+    max_pos_speed: float | None = None
 
     # Camera service (Python 3.9)
     camera_host: str = constants.CAMERA_HOST
@@ -71,7 +88,7 @@ class Args:
     remote_port: int | None = None
 
 
-def _create_local_policy(checkpoint_dir: str, config_name: str) -> tuple[Any, Any]:
+def _create_local_policy(checkpoint_dir: str, config_name: str) -> tuple[object, object]:
     """Load a local policy from checkpoint.
 
     Returns:
@@ -94,8 +111,7 @@ def _create_remote_policy(host: str, port: int) -> _websocket_client_policy.Webs
     """Create a remote policy client."""
     logger.info("Connecting to remote policy server at %s:%s", host, port)
     client = _websocket_client_policy.WebsocketClientPolicy(host=host, port=port)
-    metadata = client.get_server_metadata()
-    logger.info("Connected to remote policy server. Metadata: %s", metadata)
+    logger.info("Connected to remote policy server")
     return client
 
 
@@ -132,19 +148,6 @@ def _run_episode(
     return result
 
 
-def _save_results(results: list[dict], output_dir: pathlib.Path) -> None:
-    """Save evaluation results to CSV."""
-    output_dir.mkdir(parents=True, exist_ok=True)
-    output_path = output_dir / "results.csv"
-
-    with output_path.open("w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=["episode", "steps", "elapsed_time", "success"])
-        writer.writeheader()
-        writer.writerows(results)
-
-    logger.info("Results saved to %s", output_path)
-
-
 def main(args: Args) -> None:
     """Main evaluation function."""
     # Validate args
@@ -169,13 +172,16 @@ def main(args: Args) -> None:
         action_horizon=action_horizon,
     )
 
-    # Create robot environment
+    # Create robot environment (loads from real_env_config.yaml by default)
     real_env = _real_env.FrankaRealEnv(
+        config_path=args.real_env_config,
+        # Command-line overrides (None means use config file value)
         robot_ip=args.robot_ip,
-        robot_port=args.robot_port,
+        control_mode=args.control_mode,
         control_fps=args.control_fps,
-        workspace_bounds=constants.WORKSPACE_BOUNDS,
         max_pos_speed=args.max_pos_speed,
+        action_smoothing_alpha=args.action_smoothing_alpha,
+        cartesian_velocity_factor=args.cartesian_velocity_factor,
     )
 
     # Create camera client
@@ -193,14 +199,19 @@ def main(args: Args) -> None:
         max_episode_time=args.max_episode_time,
     )
 
+    # Get effective control fps (from args or config)
+    effective_control_fps = args.control_fps if args.control_fps is not None else _default_config.control_fps
+
+    subscribers: list = []
+
     # Create runtime
     runtime = _runtime.Runtime(
         environment=environment,
         agent=_policy_agent.PolicyAgent(policy=chunked_policy),
-        subscribers=[],
-        max_hz=args.control_fps,
+        subscribers=subscribers,
+        max_hz=effective_control_fps,
         num_episodes=1,  # We control episodes manually
-        max_episode_steps=int(args.max_episode_time * args.control_fps),
+        max_episode_steps=int(args.max_episode_time * effective_control_fps),
     )
 
     # Connect to robot
@@ -222,10 +233,6 @@ def main(args: Args) -> None:
             except KeyboardInterrupt:
                 logger.info("Evaluation interrupted by user")
                 break
-
-        # Save results
-        if args.save_summary and results:
-            _save_results(results, pathlib.Path(args.output_dir))
 
         # Print summary
         if results:

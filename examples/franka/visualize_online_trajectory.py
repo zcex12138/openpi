@@ -1,10 +1,10 @@
-"""Real-time visualization of Franka impedance target and TCP pose frames.
+"""Real-time visualization of Franka target and TCP pose frames.
 
 This script connects to the Franka robot controller and visualizes the current
-TCP pose and the impedance target pose as coordinate frames in 3D space.
+TCP pose and the target pose as coordinate frames in 3D space.
 
 Usage:
-    uv run examples/franka/visualize_impedance_pose.py [--robot-ip IP] [--robot-port PORT]
+    uv run examples/franka/visualize_online_trajectory.py [--robot-ip IP]
 """
 
 from __future__ import annotations
@@ -13,49 +13,29 @@ import argparse
 import logging
 import signal
 import sys
-from typing import Iterable
 
-import matplotlib.pyplot as plt
-import numpy as np
+from frankx import Affine
+from frankx import Robot
 from matplotlib.animation import FuncAnimation
 from matplotlib.lines import Line2D
+import matplotlib.pyplot as plt
+import numpy as np
 
-import constants
+from examples.franka import constants
+from examples.franka.utils import quat_to_rotmat as _quat_to_rotmat
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
 
-def _quat_to_rotmat(quat: Iterable[float]) -> np.ndarray:
-    """Convert quaternion [w, x, y, z] to a 3x3 rotation matrix."""
-    q = np.asarray(quat, dtype=np.float64)
-    if q.shape != (4,):
-        raise ValueError(f"Expected quaternion shape (4,), got {q.shape}")
-
-    norm = np.linalg.norm(q)
-    if norm < 1e-9:
-        return np.eye(3, dtype=np.float64)
-    w, x, y, z = q / norm
-
-    return np.array(
-        [
-            [1.0 - 2.0 * (y * y + z * z), 2.0 * (x * y - z * w), 2.0 * (x * z + y * w)],
-            [2.0 * (x * y + z * w), 1.0 - 2.0 * (x * x + z * z), 2.0 * (y * z - x * w)],
-            [2.0 * (x * z - y * w), 2.0 * (y * z + x * w), 1.0 - 2.0 * (x * x + y * y)],
-        ],
-        dtype=np.float64,
-    )
-
-
 class PoseFrameVisualizer:
-    """Real-time visualizer for TCP pose and impedance target pose."""
+    """Real-time visualizer for TCP pose and target pose."""
 
     AXIS_COLORS = ["#e41a1c", "#4daf4a", "#377eb8"]  # x=red, y=green, z=blue
 
     def __init__(
         self,
         robot_ip: str = constants.ROBOT_IP,
-        robot_port: int = constants.ROBOT_PORT,
         *,
         fps: float = 30.0,
         axis_length: float = 0.08,
@@ -64,7 +44,6 @@ class PoseFrameVisualizer:
         azim: float = 45.0,
     ) -> None:
         self._robot_ip = robot_ip
-        self._robot_port = robot_port
         self._fps = fps
         self._dt = 1.0 / fps
         self._axis_length = axis_length
@@ -78,7 +57,7 @@ class PoseFrameVisualizer:
 
         self._fig = plt.figure(figsize=(8, 8))
         self._ax = self._fig.add_subplot(111, projection="3d")
-        self._fig.suptitle("Franka Impedance Target vs TCP Pose", fontsize=14, fontweight="bold")
+        self._fig.suptitle("Franka Target vs TCP Pose", fontsize=14, fontweight="bold")
 
         self._setup_axes()
 
@@ -133,10 +112,11 @@ class PoseFrameVisualizer:
 
     def connect(self) -> None:
         """Connect to the Franka robot."""
-        from robot_client import RobotClient
-
-        logger.info("Connecting to Franka robot at %s:%s", self._robot_ip, self._robot_port)
-        self._client = RobotClient(self._robot_ip, self._robot_port)
+        logger.info("Connecting to Franka robot at %s", self._robot_ip)
+        self._client = Robot(self._robot_ip)
+        self._client.set_default_behavior()
+        self._client.recover_from_errors()
+        self._client.set_EE(constants.DEFAULT_EE_TRANSFORM)
         logger.info("Connected to Franka robot")
 
     def disconnect(self) -> None:
@@ -150,10 +130,11 @@ class PoseFrameVisualizer:
 
         try:
             state = self._client.get_state()
-            if state is None:
-                return None
-            _joint_angles, position, quaternion, _force, _velocity = state
-            return np.asarray(position, dtype=np.float64), np.asarray(quaternion, dtype=np.float64)
+            affine = Affine(state.O_T_EE)
+            return (
+                np.asarray(affine.translation(), dtype=np.float64),
+                np.asarray(affine.quaternion(), dtype=np.float64),
+            )
         except Exception as e:
             logger.warning("Failed to get TCP pose: %s", e)
             return None
@@ -163,11 +144,12 @@ class PoseFrameVisualizer:
             return None
 
         try:
-            target = self._client.get_target_pose()
-            if target is None:
-                return None
-            position, quaternion = target
-            return np.asarray(position, dtype=np.float64), np.asarray(quaternion, dtype=np.float64)
+            state = self._client.get_state()
+            affine = Affine(state.O_T_EE_d)
+            return (
+                np.asarray(affine.translation(), dtype=np.float64),
+                np.asarray(affine.quaternion(), dtype=np.float64),
+            )
         except Exception as e:
             logger.warning("Failed to get target pose: %s", e)
             return None
@@ -243,12 +225,6 @@ def main() -> None:
         help=f"Robot controller IP address (default: {constants.ROBOT_IP})",
     )
     parser.add_argument(
-        "--robot-port",
-        type=int,
-        default=constants.ROBOT_PORT,
-        help=f"Robot controller port (default: {constants.ROBOT_PORT})",
-    )
-    parser.add_argument(
         "--fps",
         type=float,
         default=30.0,
@@ -277,7 +253,6 @@ def main() -> None:
 
     visualizer = PoseFrameVisualizer(
         robot_ip=args.robot_ip,
-        robot_port=args.robot_port,
         fps=args.fps,
         axis_length=args.axis_length,
         elev=args.elev,

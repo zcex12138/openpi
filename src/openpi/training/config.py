@@ -415,6 +415,90 @@ class LeRobotFrankaDataConfig(DataConfigFactory):
 
 
 @dataclasses.dataclass(frozen=True)
+class LeRobotFrankaPositionControlDataConfig(DataConfigFactory):
+    """Data config for Franka position control: uses shifted state as action targets.
+
+    This config implements position control by extracting future robot state (pose)
+    as action targets. It leverages LeRobot's delta_timestamps mechanism to load
+    state sequences, then applies a shift transform to compensate for control latency.
+
+    Key differences from LeRobotFrankaDataConfig:
+    - Actions are derived from future states, not from dataset's action field
+    - Uses ShiftedStateToAction transform for state→action conversion
+    - No delta action transform (position control uses absolute positions)
+    """
+
+    # If provided, will be injected when no prompt is present.
+    default_prompt: str | None = None
+    # Number of action dimensions to extract from state (pose + gripper).
+    dataset_action_dim: int = 8
+    # Number of gripper dimensions at the end of the action vector.
+    gripper_dim: int = 1
+    # Number of state dimensions to use for input. None means use all dimensions.
+    dataset_state_dim: int | None = 7
+
+    # Number of additional frames to shift forward for latency compensation.
+    # 1 frame at 30Hz ≈ 33ms latency compensation.
+    state_to_action_shift: int = 1
+
+    repack_transforms: tyro.conf.Suppress[_transforms.Group] = dataclasses.field(
+        default=_transforms.Group(
+            inputs=[
+                _transforms.RepackTransform(
+                    {
+                        "observation/image": "observation.images.l500",
+                        "observation/wrist_image": "observation.images.d400",
+                        "observation/state": "observation.state",
+                        # Note: actions will be derived from state by ShiftedStateToAction
+                        "actions": "observation.state",
+                    }
+                )
+            ]
+        )
+    )
+
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+        # Build data transforms:
+        # 1. ShiftedStateToAction: convert future state to action targets
+        # 2. FrankaInputs/Outputs: robot-specific transformations
+        data_transforms = _transforms.Group(
+            inputs=[
+                # Convert shifted state sequence to action targets
+                _transforms.ShiftedStateToAction(
+                    state_key="observation/state",
+                    action_key="actions",
+                    pose_dims=slice(0, self.dataset_action_dim),
+                    additional_shift=self.state_to_action_shift,
+                ),
+                _transforms.SelectStateFrame(
+                    state_key="observation/state",
+                    frame_index=0,
+                ),
+                # Apply Franka-specific input transforms
+                franka_policy.FrankaInputs(
+                    model_type=model_config.model_type,
+                    state_dim=self.dataset_state_dim,
+                ),
+            ],
+            outputs=[franka_policy.FrankaOutputs(action_dim=self.dataset_action_dim)],
+        )
+
+        # Note: No DeltaActions transform - position control uses absolute positions
+
+        model_transforms = ModelTransformFactory(default_prompt=self.default_prompt)(model_config)
+
+        return dataclasses.replace(
+            self.create_base_config(assets_dirs, model_config),
+            repack_transforms=self.repack_transforms,
+            data_transforms=data_transforms,
+            model_transforms=model_transforms,
+            # Critical: tell LeRobot to load state sequences (not action sequences)
+            action_sequence_keys=("observation.state",),
+        )
+
+
+@dataclasses.dataclass(frozen=True)
 class RLDSDroidDataConfig(DataConfigFactory):
     """
     Config for training on DROID, using RLDS data format (for efficient training on larger datasets).
@@ -885,6 +969,46 @@ _CONFIGS = [
             decay_lr=1.0e-6,
         ),
         num_train_steps=12000,
+        batch_size=64,
+        num_workers=8,
+        log_interval=100,
+        save_interval=500,
+        keep_period=2000,
+        freeze_filter=pi0_config.Pi0Config(
+            pi05=True,
+            action_dim=8,
+            action_horizon=30,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+        ).get_freeze_filter(),
+        ema_decay=None,
+    ),
+    TrainConfig(
+        # Position control config: uses shifted state as action targets
+        # instead of impedance control actions from the dataset.
+        name="pi05_franka_position_control_lora",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_horizon=30,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+        ),
+        data=LeRobotFrankaPositionControlDataConfig(
+            repo_id="2026_0105_downsample_lerobot",
+            base_config=DataConfig(prompt_from_task=True),
+            dataset_action_dim=8,  # 7D pose + 1D gripper
+            dataset_state_dim=7,   # Only use pose for state input (user choice)
+            state_to_action_shift=1,  # 1 frame shift for latency compensation (~33ms @ 30Hz)
+            default_prompt="open the can with the screwdriver",
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("./data/checkpoints/pi05_base/params"),
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=500,
+            peak_lr=1.5e-5,
+            decay_steps=12_000,
+            decay_lr=1.0e-6,
+        ),
+        num_train_steps=6050,
         batch_size=64,
         num_workers=8,
         log_interval=100,
