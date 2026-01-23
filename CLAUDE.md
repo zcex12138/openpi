@@ -251,6 +251,9 @@ uv pip install -e packages/openpi-client && uv pip install tyro
 | `env.py` | 面向 openpi runtime 的 FrankaEnvironment 封装 |
 | `camera_service.py` | IPC 相机服务（Python 3.9） |
 | `camera_client.py` | 相机服务客户端 |
+| `pkl_recorder.py` | episode 级 PKL 录制器（运行时 Subscriber） |
+| `record_pkl.py` | 独立录制脚本（不运行 policy） |
+| `convert_pkl_to_lerobot.py` | PKL 转 LeRobot v2 数据集 |
 | `constants.py` | 默认配置常量（从 `camera_config.yaml` 加载） |
 | `visualize_online_trajectory.py` | 实时可视化 TCP 位姿与目标 |
 | `visualize_wrench.py` | 实时可视化力/力矩 |
@@ -264,6 +267,12 @@ uv pip install -e packages/openpi-client && uv pip install tyro
 
 **动作（Action）**：8 维 float32 `[x, y, z, qw, qx, qy, qz, gripper]`
 
+
+### 录制与转换（PKL）
+
+- 评估时加 `--record-pkl` 可启用 episode 级 PKL 录制，默认输出到 `eval_records/<config_name>/episode_###.pkl`。
+- 独立录制脚本：`examples/franka/record_pkl.py`（不运行 policy）。
+- 转换脚本：`examples/franka/convert_pkl_to_lerobot.py`，保持现有 LeRobot key；如需本地保存，设置 `HF_LEROBOT_HOME=/home/mpi/workspace/yhx/openpi/data/dataset`。
 
 ### 本地数据集路径
 - 使用 HF_LEROBOT_HOME 将默认数据集地址设置为本地

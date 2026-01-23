@@ -28,9 +28,24 @@ def main():
 
         print("Connected! Press 'q' to quit.")
 
+        frame_count = 0
+        last_fps_time = time.perf_counter()
+        last_print_time = last_fps_time
+        current_fps = 0.0
         while True:
             try:
                 frames, _, _ = client.get_frames()
+                frame_count += 1
+
+                now = time.perf_counter()
+                elapsed = now - last_fps_time
+                if elapsed >= 1.0:
+                    current_fps = frame_count / elapsed
+                    frame_count = 0
+                    last_fps_time = now
+                if now - last_print_time >= 1.0:
+                    print(f"FPS: {current_fps:.2f}")
+                    last_print_time = now
 
                 # Get RGB frames from both cameras
                 l500_rgb = frames.get("l500_rgb")
@@ -49,12 +64,15 @@ def main():
                     d400_bgr = d400_rgb[:, :, ::-1].copy()
                     qtcv.imshow("D400 RGB Frame", d400_bgr)
 
+                # Display Xense RGB frames if present
+                xense_1 = frames.get("xense_1_rgb")
+                if xense_1 is not None:
+                    qtcv.imshow("Xense 1 RGB Frame", xense_1[:, :, ::-1].copy())
                 # Check for quit key
                 key = qtcv.waitKey(1)
                 if key is not None and (key & 0xFF) == ord("q"):
                     print("Quit requested.")
                     break
-
             except Exception as e:
                 print(f"Error getting frames: {e}")
                 time.sleep(0.1)

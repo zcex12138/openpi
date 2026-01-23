@@ -178,4 +178,5 @@ cython_debug/
 # data
 .hf_datasets
 policy_records
+eval_records/
 数据上传.txt

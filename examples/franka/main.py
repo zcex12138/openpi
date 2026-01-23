@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import dataclasses
 import logging
+from pathlib import Path
 import time
 
 import numpy as np
@@ -42,6 +43,7 @@ from examples.franka import camera_client as _camera_client
 from examples.franka import constants
 from examples.franka import env as _env
 from examples.franka import real_env as _real_env
+from examples.franka import pkl_recorder as _pkl_recorder
 
 logger = logging.getLogger(__name__)
 
@@ -86,6 +88,13 @@ class Args:
     # Remote policy (optional, mutually exclusive with checkpoint_dir)
     remote_host: str | None = None
     remote_port: int | None = None
+
+    # Recording (optional)
+    record_pkl: bool = False
+    record_dir: str = "eval_records"
+    record_fps: float = 30.0
+    record_queue_size: int = 256
+    record_config_name: str | None = None
 
 
 def _create_local_policy(checkpoint_dir: str, config_name: str) -> tuple[object, object]:
@@ -203,6 +212,16 @@ def main(args: Args) -> None:
     effective_control_fps = args.control_fps if args.control_fps is not None else _default_config.control_fps
 
     subscribers: list = []
+    if args.record_pkl:
+        config_name = args.record_config_name or args.config or "unknown"
+        recorder_config = _pkl_recorder.RecorderConfig(
+            record_dir=Path(args.record_dir),
+            record_fps=args.record_fps,
+            queue_size=args.record_queue_size,
+            config_name=config_name,
+            prompt=args.prompt,
+        )
+        subscribers.append(_pkl_recorder.EpisodePklRecorder(environment, recorder_config))
 
     # Create runtime
     runtime = _runtime.Runtime(

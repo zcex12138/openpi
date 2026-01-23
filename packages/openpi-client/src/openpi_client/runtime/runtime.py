@@ -1,11 +1,11 @@
 import logging
+import logging
 import threading
 import time
 
 from openpi_client.runtime import agent as _agent
 from openpi_client.runtime import environment as _environment
 from openpi_client.runtime import subscriber as _subscriber
-
 
 class Runtime:
     """The core module orchestrating interactions between key components of the system."""
@@ -55,6 +55,7 @@ class Runtime:
         self._agent.reset()
         for subscriber in self._subscribers:
             subscriber.on_episode_start()
+        episode_started = True
 
         self._in_episode = True
         self._episode_steps = 0
@@ -62,22 +63,27 @@ class Runtime:
         step_time = 1 / self._max_hz if self._max_hz > 0 else 0
         last_step_time = time.time()
 
-        while self._in_episode:
-            self._step()
-            self._episode_steps += 1
+        try:
+            while self._in_episode:
+                self._step()
+                self._episode_steps += 1
 
-            # Sleep to maintain the desired frame rate
-            now = time.time()
-            dt = now - last_step_time
-            if dt < step_time:
-                time.sleep(step_time - dt)
-                last_step_time = time.time()
-            else:
+                # Sleep to maintain the desired frame rate
+                now = time.time()
+                dt = now - last_step_time
+                if dt < step_time:
+                    time.sleep(step_time - dt)
+                    now = time.time()
                 last_step_time = now
-
-        logging.info("Episode completed.")
-        for subscriber in self._subscribers:
-            subscriber.on_episode_end()
+        except KeyboardInterrupt:
+            logging.info("Episode interrupted by user.")
+            self._in_episode = False
+            raise
+        finally:
+            if episode_started:
+                logging.info("Episode finished.")
+                for subscriber in self._subscribers:
+                    subscriber.on_episode_end()
 
     def _step(self) -> None:
         """A single step of the runtime loop."""

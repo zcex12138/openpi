@@ -130,6 +130,34 @@ class FrankaEnvironment(_environment.Environment):
             "prompt": self._prompt,
         }
 
+    def get_recording_frame(self) -> dict:
+        """Get raw frames + robot state for recording."""
+        state = self._real_env.get_state()
+        tcp_pose = np.asarray(state[:7], dtype=np.float32)
+        gripper = np.asarray(state[7:8], dtype=np.float32)
+        wrench = np.asarray(state[8:14], dtype=np.float32)
+        tcp_velocity = self._real_env.get_tcp_velocity()
+
+        try:
+            frames, marker3d, timestamp_ns, seq = self._camera.get_frames_with_markers()
+        except Exception as e:
+            logger.warning("Camera frame retrieval failed for recording: %s", e)
+            frames = {}
+            marker3d = {}
+            timestamp_ns = 0
+            seq = -1
+
+        return {
+            "frames": frames,
+            "marker3d": marker3d,
+            "timestamp_ns": int(timestamp_ns),
+            "seq": int(seq),
+            "tcp_pose": tcp_pose,
+            "tcp_velocity": tcp_velocity,
+            "wrench": wrench,
+            "gripper": gripper,
+        }
+
     @override
     def apply_action(self, action: dict) -> None:
         """Apply a single-step action.

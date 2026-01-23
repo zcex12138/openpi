@@ -1,0 +1,7 @@
+#!/home/mpi/workspace/yhx/openpi/examples/franka/.venv_viz/bin/python
+import sys
+from accelerate.commands.config import main
+if __name__ == '__main__':
+    if sys.argv[0].endswith('.exe'):
+        sys.argv[0] = sys.argv[0][:-4]
+    sys.exit(main())

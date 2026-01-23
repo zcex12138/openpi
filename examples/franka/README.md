@@ -43,6 +43,7 @@ PYTHONPATH=/home/mpi/workspace/yhx/openpi python examples/franka/main.py \
     --remote-port 8000 \
     --control-mode cartesian \
     --prompt "open the can with the screwdriver" \
+    --record-pkl \
     --open-loop-horizon 3 \
     --max-pos-speed 0.1 \
     --max-episode-time 120.0 \
@@ -57,7 +58,24 @@ uv run examples/franka/main.py \
     --checkpoint-dir ./checkpoints/10000 \
     --config pi05_franka_screwdriver_lora \
     --prompt "open the can with the screwdriver" \
+    --record-pkl \
     --num-episodes 10
+```
+
+### 5. PKL 录制与转换（可选）
+
+**独立录制（不运行 policy）**：
+```bash
+PYTHONPATH=/home/mpi/workspace/yhx/openpi python examples/franka/record_pkl.py \
+    --record-dir eval_records \
+    --record-fps 30 \
+    --num-episodes 1
+```
+
+**转换为 LeRobot v2 数据集**：
+```bash
+PYTHONPATH=/home/mpi/workspace/yhx/openpi python examples/franka/convert_pkl_to_lerobot.py \
+    --records eval_records/pi05_franka_screwdriver_lora
 ```
 
 ### 4. 可视化工具
@@ -94,3 +112,8 @@ PYTHONPATH=/home/mpi/workspace/yhx/openpi python examples/franka/visualize_wrenc
 | `--camera-timeout-s` | `0.1` | 相机服务超时时间（秒，`camera_config.yaml`） |
 | `--remote-host` | None | 远程 policy server host（与 `--checkpoint-dir` 互斥） |
 | `--remote-port` | `8000` | 远程 policy server 端口 |
+| `--record-pkl` | `false` | 启用 episode 级 PKL 录制 |
+| `--record-dir` | `eval_records` | PKL 输出根目录 |
+| `--record-fps` | `30.0` | PKL 录制帧率（独立于控制频率） |
+| `--record-queue-size` | `256` | 录制队列长度（满时丢帧） |
+| `--record-config-name` | None | 录制输出目录的 config 名称（默认使用 `--config`） |

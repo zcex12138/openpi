@@ -18,20 +18,20 @@ workspace_bounds:
 
 # Motion limits
 motion:
-  max_pos_speed: 0.5  # Maximum TCP speed (m/s)
+  max_pos_speed: 0.3  # Maximum TCP speed (m/s)
 
 # Impedance control parameters (only used when control.mode = "impedance")
 impedance:
-  translational_stiffness: 1400.0  # Translational stiffness (N/m)
-  rotational_stiffness: 80.0       # Rotational stiffness (Nm/rad)
+  translational_stiffness: 2000.0  # Translational stiffness (N/m)
+  rotational_stiffness: 110.0       # Rotational stiffness (Nm/rad)
 
 # Cartesian control parameters (only used when control.mode = "cartesian")
 cartesian:
-  velocity_factor: 0.05  # Velocity factor for cartesian waypoint motion (0.0-1.0)
+  velocity_factor: 0.03  # Velocity factor for cartesian waypoint motion (0.0-1.0)
 
 # Action smoothing
 smoothing:
-  alpha: 0.5  # EMA filter alpha (0.0=no smoothing, 0.5=moderate, 0.9=heavy)
+  alpha: 0.1  # EMA filter alpha (0.0=no smoothing, 0.5=moderate, 0.9=heavy)
 
 # Gripper configuration
 gripper:
@@ -49,7 +49,7 @@ reset:
   auto_on_disconnect: true  # Auto reset robot on disconnect
   # Default joint position for reset (7 joint angles in radians)
   default_joint_position: [-0.26134401, 0.46399827, -0.02856101, -2.23260865, -0.00302741, 2.67803179, 0.5054156]
-  move_speed_factor: 0.3    # Speed factor for joint motion (0.0-1.0)
+  move_speed_factor: 0.2    # Speed factor for joint motion (0.0-1.0)
 
 # End-effector transform (NE_T_EE) - 4x4 row-major matrix
 # Identity matrix by default to match training pose conventions

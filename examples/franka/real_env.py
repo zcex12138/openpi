@@ -312,6 +312,14 @@ class FrankaRealEnv:
         self._last_state = state_vec
         return self._last_state
 
+    def get_tcp_velocity(self) -> np.ndarray:
+        """Get TCP 6D velocity from cached control-loop robot state if available."""
+        state = self._get_robot_state()
+        velocity = getattr(state, "O_dP_EE_c", None)
+        if velocity is None:
+            return np.zeros((6,), dtype=np.float32)
+        return np.asarray(velocity, dtype=np.float32)
+
     def execute_action(self, action: np.ndarray) -> np.ndarray:
         """Execute action on robot with safety checks.
 
@@ -423,10 +431,8 @@ class FrankaRealEnv:
         """Return interpolated gripper state without reading width/force."""
         current_time = time.time()
 
-        is_moving = self._get_gripper_is_moving()
-        if is_moving is False and self._gripper_interpolator.is_interpolating:
-            self._gripper_interpolator.mark_early_termination()
-        elif is_moving is None and self._gripper_thread is not None:
+        # Avoid querying gripper hardware state; rely on time-based interpolation.
+        if self._gripper_thread is not None:
             try:
                 if (not self._gripper_thread.is_alive()) and self._gripper_interpolator.is_interpolating:
                     self._gripper_interpolator.mark_early_termination()

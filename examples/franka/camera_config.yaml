@@ -33,14 +33,11 @@ camera:
     - camera_index: 'OG000048'
       camera_name: 'xense_camera_1'
 
-    - camera_index: 'OG000235'
-      camera_name: 'xense_camera_2'
-
   # Camera service configuration
   camera_service:
     host: "0.0.0.0"  # Listen on all interfaces
     port: 5050  # TCP port for camera service
-    poll_hz: 30.0  # Frame polling frequency (0 = on-demand only)
+    poll_hz: 50.0  # Frame polling frequency (0 = on-demand only)
     convert_bgr: true  # Convert BGR to RGB in output
 
     # Camera selection (match by name or type)
@@ -57,6 +54,11 @@ camera:
     # Output frame keys
     l500_key: 'l500_rgb'  # Key for L500 frame in response
     d400_key: 'd400_rgb'  # Key for D400/Xense frame in response
+
+    # Xense outputs (optional; enable when xense_cameras are present)
+    xense_names: ['xense_camera_1']
+    xense_keys: ['xense_1_rgb']
+    xense_marker_keys: ['xense_1_marker3d']
 
 # Camera client configuration (for evaluation scripts)
 camera_client:
