@@ -91,6 +91,15 @@ class RealEnvConfig:
     num_episodes: int = 10
     default_prompt: str = "open the can with the screwdriver"
 
+    # Teaching mode
+    teaching_translational_stiffness: float = 0.0
+    teaching_rotational_stiffness: float = 0.0
+    teaching_load_mass: float = 0.3
+    teaching_load_com: list[float] = field(default_factory=lambda: [0.0, 0.0, 0.0])
+    teaching_load_inertia: list[float] = field(
+        default_factory=lambda: [0.001, 0, 0, 0, 0.001, 0, 0, 0, 0.001]
+    )
+
     @property
     def workspace_bounds(self) -> tuple[np.ndarray, np.ndarray]:
         """Return workspace bounds as numpy arrays."""
@@ -114,6 +123,8 @@ class RealEnvConfig:
         _default_ws_max = [0.8, 0.5, 0.6]
         _default_joint_pos = [-0.26134401, 0.46399827, -0.02856101, -2.23260865, -0.00302741, 2.67803179, 0.5054156]
         _default_ee_transform = [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0]
+        _default_load_com = [0.0, 0.0, 0.0]
+        _default_load_inertia = [0.001, 0, 0, 0, 0.001, 0, 0, 0, 0.001]
 
         return cls(
             robot_ip=get_nested(cfg, ["robot", "ip"], "172.16.0.2"),
@@ -142,6 +153,12 @@ class RealEnvConfig:
             max_episode_time=get_nested(cfg, ["evaluation", "max_episode_time"], 30.0),
             num_episodes=get_nested(cfg, ["evaluation", "num_episodes"], 10),
             default_prompt=get_nested(cfg, ["evaluation", "default_prompt"], "open the can with the screwdriver"),
+            # Teaching mode
+            teaching_translational_stiffness=get_nested(cfg, ["teaching", "translational_stiffness"], 0.0),
+            teaching_rotational_stiffness=get_nested(cfg, ["teaching", "rotational_stiffness"], 0.0),
+            teaching_load_mass=get_nested(cfg, ["teaching", "load_mass"], 0.3),
+            teaching_load_com=get_nested(cfg, ["teaching", "load_com"], _default_load_com),
+            teaching_load_inertia=get_nested(cfg, ["teaching", "load_inertia"], _default_load_inertia),
         )
 
 _CONTROL_MODES = ("impedance", "cartesian")
@@ -245,6 +262,7 @@ class FrankaRealEnv:
         self._gripper_interpolator = GripperStateInterpolator(
             interpolation_duration=_gripper_interp_duration
         )
+        self._teaching_mode: bool = False
 
     def connect(self) -> None:
         """Connect to the Franka robot controller."""
@@ -693,11 +711,53 @@ class FrankaRealEnv:
         self._stop_impedance_motion()
         self._stop_waypoint_motion()
 
+    @property
+    def is_teaching_mode(self) -> bool:
+        return self._teaching_mode
+
+    def enable_teaching_mode(self) -> None:
+        """Switch to zero-stiffness teaching mode."""
+        if self._control_mode != "impedance":
+            logger.warning("Teaching mode only available in impedance control mode")
+            return
+        if self._teaching_mode:
+            return
+        if self._robot is None:
+            raise RuntimeError("Robot not connected. Call connect() first.")
+
+        logger.info("Enabling teaching mode...")
+        self._stop_impedance_motion()
+
+        try:
+            self._robot.set_load(
+                self._config.teaching_load_mass,
+                self._config.teaching_load_com,
+                self._config.teaching_load_inertia,
+            )
+        except Exception as e:
+            logger.warning("set_load failed (robot may sag): %s", e)
+
+        self._impedance_motion = ImpedanceMotion(
+            self._config.teaching_translational_stiffness,
+            self._config.teaching_rotational_stiffness,
+        )
+        current_affine = self._get_current_affine(force_robot_state=True)
+        self._impedance_motion.target = current_affine
+
+        try:
+            self._impedance_thread = self._robot.move_async(self._impedance_motion)
+        except Exception as e:
+            raise RuntimeError(f"Failed to start teaching motion: {e}") from e
+
+        self._teaching_mode = True
+        logger.info("Teaching mode enabled - robot can be guided by hand")
+
     def reset(self, grasp: bool = True, *, start_control: bool = True) -> None:
         """Reset robot to default position and optionally grasp the screwdriver."""
         if self._robot is None or self._gripper is None:
             raise RuntimeError("Robot not connected. Call connect() first.")
 
+        self._teaching_mode = False
         logger.info("Resetting robot...")
 
         logger.info("Stopping active control motions...")

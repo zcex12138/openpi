@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import sys
 import time
 from typing import TYPE_CHECKING
 
@@ -57,6 +58,10 @@ class FrankaEnvironment(_environment.Environment):
         self._episode_complete: bool = False
         self._last_frame_seq: int | None = None
         self._stale_frame_count: int = 0
+        self._teaching_mode_active: bool = False
+        self._keyboard_enabled: bool = sys.stdin.isatty()
+        if not self._keyboard_enabled:
+            logger.warning("stdin is not a TTY, keyboard teaching disabled")
 
     @override
     def reset(self) -> None:
@@ -66,6 +71,7 @@ class FrankaEnvironment(_environment.Environment):
         self._episode_start_time = time.time()
         self._step_count = 0
         self._episode_complete = False
+        self._teaching_mode_active = False
         logger.info("Environment reset complete")
 
     @override
@@ -73,6 +79,8 @@ class FrankaEnvironment(_environment.Environment):
         """Check if episode is complete (timeout or user signal)."""
         if self._episode_complete:
             return True
+        if self._teaching_mode_active:
+            return False
         elapsed = time.time() - self._episode_start_time
         if elapsed > self._max_episode_time:
             logger.info("Episode timeout after %.1fs", elapsed)
@@ -83,6 +91,23 @@ class FrankaEnvironment(_environment.Environment):
     def mark_episode_complete(self) -> None:
         """Mark the current episode as complete."""
         self._episode_complete = True
+
+    @property
+    def is_teaching_mode(self) -> bool:
+        return self._real_env.is_teaching_mode
+
+    def enable_teaching_mode(self) -> None:
+        self._real_env.enable_teaching_mode()
+        self._teaching_mode_active = True
+
+    def _check_teaching_trigger(self) -> None:
+        """Check for spacebar press and trigger teaching mode."""
+        if not self._keyboard_enabled or self._teaching_mode_active:
+            return
+        from examples.franka.keyboard_utils import check_key_pressed
+        key = check_key_pressed()
+        if key == " ":
+            self.enable_teaching_mode()
 
     @override
     def get_observation(self) -> dict:
@@ -166,6 +191,8 @@ class FrankaEnvironment(_environment.Environment):
             action: Dict with "actions" key containing the action array.
                    Shape: (action_horizon, action_dim) or (action_dim,)
         """
+        self._check_teaching_trigger()
+
         actions = np.asarray(action["actions"])
 
         # Handle action chunk (take first action if chunked)

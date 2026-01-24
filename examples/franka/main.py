@@ -44,6 +44,7 @@ from examples.franka import constants
 from examples.franka import env as _env
 from examples.franka import real_env as _real_env
 from examples.franka import pkl_recorder as _pkl_recorder
+from examples.franka.keyboard_utils import cbreak_terminal
 
 logger = logging.getLogger(__name__)
 
@@ -94,7 +95,6 @@ class Args:
     record_dir: str = "eval_records"
     record_fps: float = 30.0
     record_queue_size: int = 256
-    record_config_name: str | None = None
 
 
 def _create_local_policy(checkpoint_dir: str, config_name: str) -> tuple[object, object]:
@@ -143,7 +143,8 @@ def _run_episode(
 
     start_time = time.time()
     # Runtime.run() handles the episode loop internally
-    runtime.run()
+    with cbreak_terminal():
+        runtime.run()
     elapsed_time = time.time() - start_time
 
     result = {
@@ -213,12 +214,10 @@ def main(args: Args) -> None:
 
     subscribers: list = []
     if args.record_pkl:
-        config_name = args.record_config_name or args.config or "unknown"
         recorder_config = _pkl_recorder.RecorderConfig(
             record_dir=Path(args.record_dir),
             record_fps=args.record_fps,
             queue_size=args.record_queue_size,
-            config_name=config_name,
             prompt=args.prompt,
         )
         subscribers.append(_pkl_recorder.EpisodePklRecorder(environment, recorder_config))
@@ -230,7 +229,7 @@ def main(args: Args) -> None:
         subscribers=subscribers,
         max_hz=effective_control_fps,
         num_episodes=1,  # We control episodes manually
-        max_episode_steps=int(args.max_episode_time * effective_control_fps),
+        max_episode_steps=0,  # Disable step limit; timeout handled by FrankaEnvironment
     )
 
     # Connect to robot

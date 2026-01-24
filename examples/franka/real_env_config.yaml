@@ -65,3 +65,11 @@ evaluation:
   max_episode_time: 30.0  # Maximum episode duration (seconds)
   num_episodes: 10        # Default number of evaluation episodes
   default_prompt: "open the can with the screwdriver"  # Default task prompt
+
+# Teaching mode (for human guidance)
+teaching:
+  translational_stiffness: 500.0      # Translational stiffness (N/m), 0 = fully compliant
+  rotational_stiffness: 5.0         # Rotational stiffness (Nm/rad), 0 = fully compliant
+  load_mass: 0.3                    # End-effector load mass [kg]
+  load_com: [0.0, 0.0, 0.0]         # Load center of mass [m]
+  load_inertia: [0.001, 0, 0, 0, 0.001, 0, 0, 0, 0.001]  # Load inertia matrix [kg·m²]

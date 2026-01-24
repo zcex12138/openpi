@@ -25,7 +25,6 @@ class RecorderConfig:
     record_dir: Path
     record_fps: float = 30.0
     queue_size: int = 256
-    config_name: str = "unknown"
     prompt: str = ""
 
 
@@ -77,7 +76,7 @@ class EpisodePklRecorder(_subscriber.Subscriber):
         self._record_thread.start()
 
     def _resolve_start_index(self) -> int:
-        output_dir = Path(self._config.record_dir) / (self._config.config_name or "unknown")
+        output_dir = Path(self._config.record_dir)
         if not output_dir.exists():
             return -1
         max_idx = -1
@@ -103,13 +102,12 @@ class EpisodePklRecorder(_subscriber.Subscriber):
         if self._worker is not None:
             self._worker.join(timeout=10.0)
 
-        output_dir = Path(self._config.record_dir) / (self._config.config_name or "unknown")
+        output_dir = Path(self._config.record_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
         output_path = output_dir / f"episode_{self._episode_index:03d}.pkl"
 
         payload = {
             "version": 1,
-            "config_name": self._config.config_name or "unknown",
             "episode_index": self._episode_index,
             "prompt": self._config.prompt,
             "fps": float(self._config.record_fps),
@@ -204,6 +202,7 @@ class EpisodePklRecorder(_subscriber.Subscriber):
             "tcp_velocity": np.asarray(sample.get("tcp_velocity", np.zeros(6, dtype=np.float32)), dtype=np.float32),
             "wrench": np.asarray(sample.get("wrench", np.zeros(6, dtype=np.float32)), dtype=np.float32),
             "gripper": np.asarray(sample.get("gripper", np.zeros(1, dtype=np.float32)), dtype=np.float32),
+            "is_human_teaching": self._env.is_teaching_mode,
         }
         self._frame_index += 1
         return record

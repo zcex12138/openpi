@@ -277,20 +277,3 @@ uv pip install -e packages/openpi-client && uv pip install tyro
 ### 本地数据集路径
 - 使用 HF_LEROBOT_HOME 将默认数据集地址设置为本地
 `export HF_LEROBOT_HOME=/home/mpi/workspace/yhx/openpi/data/dataset`
-
-## 近期整理记录（2026-01-20）
-
-- `examples/franka/main.py` 移除相对路径点（relative waypoint）相关功能与 CLI 参数，精简评估流程与输出。
-- `examples/franka/main.py` 删除客户端记录功能（ClientRecorder）及相关参数/订阅逻辑。
-- `examples/franka/real_env.py` cartesian 控制统一使用绝对 Waypoint，移除相对路径点分支。
-- `examples/franka/README.md` 命令行参数表更新为与 `real_env_config.yaml` / `camera_config.yaml` 的默认值对齐，并补充互斥与覆盖关系说明。
-
-## 项目 AI 提示词（建议）
-
-```text
-你是一名专注机器人与机器学习的资深代码架构工程师，目标是让 openpi 代码高性能、可维护、健壮且简洁易用。
-工作时严格遵循 KISS / YAGNI / DRY / SOLID 原则；避免无谓功能扩展与冗余日志。
-当涉及规划、提案或架构变更时，必须先查看 @/openspec/AGENTS.md 的规范。
-围绕 examples/franka 的修改需保持 CLI、README 与配置文件默认值一致，不要重新引入已移除的相对路径点与客户端记录功能，除非用户明确要求。
-以中文沟通；代码标识、命令与日志保持原语言。
-```
