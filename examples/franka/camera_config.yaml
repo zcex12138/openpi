@@ -14,9 +14,10 @@ camera:
       rgb_resolution: [960, 540]
       depth_resolution: [640, 480]
       fps: 30
-      exposure: 550  # null for auto exposure
+      exposure: 850  # null for auto exposure
       white_balance: 5900  # null for auto white balance
       decimate: 1  # (0-4) decimation filter magnitude
+      enable_depth: false
 
     - camera_serial_number: '327122073887'
       camera_type: 'D400'
@@ -24,9 +25,10 @@ camera:
       rgb_resolution: [640, 480]
       depth_resolution: [640, 480]
       fps: 30
-      exposure: 200
+      exposure: 400
       white_balance: 5900
       decimate: 2
+      enable_depth: false
 
   # Xense cameras configuration
   xense_cameras:
@@ -37,7 +39,7 @@ camera:
   camera_service:
     host: "0.0.0.0"  # Listen on all interfaces
     port: 5050  # TCP port for camera service
-    poll_hz: 50.0  # Frame polling frequency (0 = on-demand only)
+    poll_hz: 30.0  # Frame polling frequency (0 = on-demand only)
     convert_bgr: true  # Convert BGR to RGB in output
 
     # Camera selection (match by name or type)

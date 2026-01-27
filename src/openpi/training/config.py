@@ -390,14 +390,18 @@ class LeRobotFrankaDataConfig(DataConfigFactory):
     @override
     def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
         data_transforms = _transforms.Group(
-            inputs=[franka_policy.FrankaInputs(
-                model_type=model_config.model_type,
-                state_dim=self.dataset_state_dim,
-            )],
+            inputs=[
+                franka_policy.FrankaInputs(
+                    model_type=model_config.model_type,
+                    state_dim=self.dataset_state_dim,
+                )
+            ],
             outputs=[franka_policy.FrankaOutputs(action_dim=self.dataset_action_dim)],
         )
         if self.use_delta_joint_actions:
-            delta_action_mask = _transforms.make_bool_mask(self.dataset_action_dim - self.gripper_dim, -self.gripper_dim)
+            delta_action_mask = _transforms.make_bool_mask(
+                self.dataset_action_dim - self.gripper_dim, -self.gripper_dim
+            )
             data_transforms = data_transforms.push(
                 inputs=[_transforms.DeltaActions(delta_action_mask)],
                 outputs=[_transforms.AbsoluteActions(delta_action_mask)],
@@ -415,7 +419,7 @@ class LeRobotFrankaDataConfig(DataConfigFactory):
 
 
 @dataclasses.dataclass(frozen=True)
-class LeRobotFrankaPositionControlDataConfig(DataConfigFactory):
+class LeRobotFrankaDataConfigV2(DataConfigFactory):
     """Data config for Franka position control: uses shifted state as action targets.
 
     This config implements position control by extracting future robot state (pose)
@@ -908,96 +912,20 @@ _CONFIGS = [
     # Fine-tuning Franka configs.
     #
     TrainConfig(
-        name="pi05_franka_screwdriver_lora",
-        model=pi0_config.Pi0Config(
-            pi05=True,
-            # action_dim defaults to 32 (must match pi05_base checkpoint)
-            action_horizon=30,
-            paligemma_variant="gemma_2b_lora",
-            action_expert_variant="gemma_300m_lora",
-        ),
-        data=LeRobotFrankaDataConfig(
-            repo_id="single_arm_screwdriver",
-            base_config=DataConfig(prompt_from_task=True),
-            dataset_action_dim=8,
-            use_delta_joint_actions=False,
-            default_prompt="open the can with the screwdriver",
-        ),
-        weight_loader=weight_loaders.CheckpointWeightLoader("./data/checkpoints/pi05_base/params"),
-        lr_schedule=_optimizer.CosineDecaySchedule(
-            warmup_steps=500,
-            peak_lr=1.5e-5,
-            decay_steps=12_000,
-            decay_lr=1.0e-6,
-        ),
-        num_train_steps=12000,
-        batch_size=64,
-        num_workers=8,
-        log_interval=100,
-        save_interval=500,
-        keep_period=2000,
-        freeze_filter=pi0_config.Pi0Config(
-            pi05=True,
-            action_dim=8,
-            action_horizon=30,
-            paligemma_variant="gemma_2b_lora",
-            action_expert_variant="gemma_300m_lora",
-        ).get_freeze_filter(),
-        ema_decay=None,
-    ),
-    TrainConfig(
-        name="pi05_franka_screwdriver_14d_lora",
-        model=pi0_config.Pi0Config(
-            pi05=True,
-            action_horizon=30,
-            paligemma_variant="gemma_2b_lora",
-            action_expert_variant="gemma_300m_lora",
-        ),
-        data=LeRobotFrankaDataConfig(
-            repo_id="2026_0105_downsample_lerobot",
-            base_config=DataConfig(prompt_from_task=True),
-            dataset_action_dim=8,
-            dataset_state_dim=None,  # Use all 14 dimensions (pose + force/torque)
-            use_delta_joint_actions=False,
-            default_prompt="open the can with the screwdriver",
-        ),
-        weight_loader=weight_loaders.CheckpointWeightLoader("./data/checkpoints/pi05_base/params"),
-        lr_schedule=_optimizer.CosineDecaySchedule(
-            warmup_steps=500,
-            peak_lr=1.5e-5,
-            decay_steps=12_000,
-            decay_lr=1.0e-6,
-        ),
-        num_train_steps=12000,
-        batch_size=64,
-        num_workers=8,
-        log_interval=100,
-        save_interval=500,
-        keep_period=2000,
-        freeze_filter=pi0_config.Pi0Config(
-            pi05=True,
-            action_dim=8,
-            action_horizon=30,
-            paligemma_variant="gemma_2b_lora",
-            action_expert_variant="gemma_300m_lora",
-        ).get_freeze_filter(),
-        ema_decay=None,
-    ),
-    TrainConfig(
         # Position control config: uses shifted state as action targets
         # instead of impedance control actions from the dataset.
-        name="pi05_franka_position_control_lora",
+        name="pi05_franka_cola_lora",
         model=pi0_config.Pi0Config(
             pi05=True,
             action_horizon=30,
             paligemma_variant="gemma_2b_lora",
             action_expert_variant="gemma_300m_lora",
         ),
-        data=LeRobotFrankaPositionControlDataConfig(
-            repo_id="2026_0105_downsample_lerobot",
+        data=LeRobotFrankaDataConfigV2(
+            repo_id="2026_0105_pi05_franka_cola_lerobot_v2.0",
             base_config=DataConfig(prompt_from_task=True),
             dataset_action_dim=8,  # 7D pose + 1D gripper
-            dataset_state_dim=7,   # Only use pose for state input (user choice)
+            dataset_state_dim=7,  # Only use pose for state input (user choice)
             state_to_action_shift=1,  # 1 frame shift for latency compensation (~33ms @ 30Hz)
             default_prompt="open the can with the screwdriver",
         ),
@@ -1009,6 +937,49 @@ _CONFIGS = [
             decay_lr=1.0e-6,
         ),
         num_train_steps=6050,
+        batch_size=64,
+        num_workers=8,
+        log_interval=100,
+        save_interval=500,
+        keep_period=2000,
+        freeze_filter=pi0_config.Pi0Config(
+            pi05=True,
+            action_dim=8,
+            action_horizon=30,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+        ).get_freeze_filter(),
+        ema_decay=None,
+    ),
+    TrainConfig(
+        # Continue training from pi05_franka_position_control_lora/6000 checkpoint
+        # with new cola dataset, using shifted state as action targets.
+        name="pi05_franka_cola_lora_finetune",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_horizon=30,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+        ),
+        data=LeRobotFrankaDataConfigV2(
+            repo_id="2026_0126_pi05_franka_cola_lerobot_v2.0",
+            base_config=DataConfig(prompt_from_task=True),
+            dataset_action_dim=8,  # 7D pose + 1D gripper
+            dataset_state_dim=7,  # Only use pose for state input
+            state_to_action_shift=1,  # 1 frame shift for latency compensation (~33ms @ 30Hz)
+            default_prompt="open the can with the screwdriver",
+        ),
+        # Load weights from the trained checkpoint
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "./data/checkpoints/pi05_franka_position_control_lora/6000/params"
+        ),
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=500,
+            peak_lr=1.5e-5,
+            decay_steps=12_000,
+            decay_lr=1.0e-6,
+        ),
+        num_train_steps=3000,
         batch_size=64,
         num_workers=8,
         log_interval=100,

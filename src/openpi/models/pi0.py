@@ -277,3 +277,95 @@ class Pi0(_model.BaseModel):
 
         x_0, _ = jax.lax.while_loop(cond, step, (noise, 1.0))
         return x_0
+
+    def realtime_sample_actions(
+        self,
+        rng: at.KeyArrayLike,
+        observation: _model.Observation,
+        *,
+        action_prefix: at.Float[at.Array, "b p ad"] | None = None,
+        num_steps: int | at.Int[at.Array, ""] = 10,
+        noise: at.Float[at.Array, "b ah ad"] | None = None,
+    ) -> _model.Actions:
+        """Sample actions with prefix conditioning for real-time chunking.
+
+        When action_prefix is provided, those positions are treated as already-denoised
+        (time=0) and remain fixed during sampling. Only the remaining positions are
+        sampled from noise.
+
+        Args:
+            rng: Random key for sampling.
+            observation: Model observation inputs.
+            action_prefix: Previously executed actions to condition on. Shape [b, p, ad]
+                where p <= action_horizon. If None, falls back to standard sampling.
+            num_steps: Number of flow matching integration steps.
+            noise: Optional fixed noise for reproducibility.
+
+        Returns:
+            Full action chunk of shape [b, action_horizon, action_dim].
+        """
+        if action_prefix is None:
+            return self.sample_actions(rng, observation, num_steps=num_steps, noise=noise)
+
+        observation = _model.preprocess_observation(None, observation, train=False)
+        batch_size = observation.state.shape[0]
+        prefix_len = action_prefix.shape[1]
+
+        if prefix_len >= self.action_horizon:
+            raise ValueError(
+                f"action_prefix length ({prefix_len}) must be less than action_horizon ({self.action_horizon})"
+            )
+
+        dt = -1.0 / num_steps
+        if noise is None:
+            noise = jax.random.normal(rng, (batch_size, self.action_horizon, self.action_dim))
+
+        # Initialize: prefix positions use actual actions, suffix positions use noise
+        x_init = jnp.concatenate([action_prefix, noise[:, prefix_len:, :]], axis=1)
+
+        # Precompute prefix KV cache
+        prefix_tokens, prefix_mask, prefix_ar_mask = self.embed_prefix(observation)
+        prefix_attn_mask = make_attn_mask(prefix_mask, prefix_ar_mask)
+        positions = jnp.cumsum(prefix_mask, axis=1) - 1
+        _, kv_cache = self.PaliGemma.llm([prefix_tokens, None], mask=prefix_attn_mask, positions=positions)
+
+        # Create time mask: prefix positions have time=0, suffix positions have current time
+        prefix_time = jnp.zeros((batch_size,))
+
+        def step(carry):
+            x_t, time = carry
+            # Per-position time: prefix=0, suffix=current time
+            # For embed_suffix, we pass scalar time but the velocity update only applies to suffix
+            suffix_tokens, suffix_mask, suffix_ar_mask, adarms_cond = self.embed_suffix(
+                observation, x_t, jnp.broadcast_to(time, batch_size)
+            )
+
+            suffix_attn_mask = make_attn_mask(suffix_mask, suffix_ar_mask)
+            prefix_attn_mask_expanded = einops.repeat(prefix_mask, "b p -> b s p", s=suffix_tokens.shape[1])
+            full_attn_mask = jnp.concatenate([prefix_attn_mask_expanded, suffix_attn_mask], axis=-1)
+            positions = jnp.sum(prefix_mask, axis=-1)[:, None] + jnp.cumsum(suffix_mask, axis=-1) - 1
+
+            (_, suffix_out), _ = self.PaliGemma.llm(
+                [None, suffix_tokens],
+                mask=full_attn_mask,
+                positions=positions,
+                kv_cache=kv_cache,
+                adarms_cond=[None, adarms_cond],
+            )
+            v_t = self.action_out_proj(suffix_out[:, -self.action_horizon:])
+
+            # Only update suffix positions (prefix remains fixed)
+            update_mask = jnp.concatenate([
+                jnp.zeros((batch_size, prefix_len, self.action_dim)),
+                jnp.ones((batch_size, self.action_horizon - prefix_len, self.action_dim)),
+            ], axis=1)
+            x_new = x_t + dt * v_t * update_mask
+
+            return x_new, time + dt
+
+        def cond(carry):
+            _, time = carry
+            return time >= -dt / 2
+
+        x_0, _ = jax.lax.while_loop(cond, step, (x_init, 1.0))
+        return x_0

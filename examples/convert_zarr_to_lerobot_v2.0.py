@@ -4,14 +4,10 @@
 Usage:
     uv run examples/convert_zarr_to_lerobot.py \
         --zarr_path /path/to/replay_buffer.zarr \
-        --annotations_path /path/to/annotations.json \
         --repo_id your_name/dataset_name
 """
 
-import json
-import re
 import shutil
-from pathlib import Path
 
 import numpy as np
 import tqdm
@@ -21,12 +17,12 @@ from lerobot.common.datasets.lerobot_dataset import HF_LEROBOT_HOME, LeRobotData
 
 
 def main(
-    zarr_path: str = "/home/mpi/workspace/yhx/openpi/dataset/2026_0105_224/replay_buffer.zarr",
-    annotations_path: str = "/home/mpi/workspace/yhx/openpi/dataset/2026_0105_224/annotations.json",
-    repo_id: str = "local/single_arm_screwdriver",
-    task: str = "使用螺丝刀将可乐罐撬开",
+    zarr_path: str = "/home/mpi/workspace/yhx/openpi/eval_records/pi05_franka_position_control_lora/20260126/replay_buffer.zarr",
+    repo_id: str = "2026_0126_pi05_franka_cola_lerobot_v2.0",
+    task: str = "open the can with the screwdriver",
     fps: int = 30,
-    success_only: bool = True,
+    image_writer_processes: int = 10,
+    image_writer_threads: int = 5,
     push_to_hub: bool = False,
 ):
     # 清理已存在的数据集
@@ -61,50 +57,7 @@ def main(
     print(f"  Action 维度: {actions.shape[1]}")
     print(f"  State 维度: {tcp_pose.shape[1] + tcp_wrench.shape[1]}")
 
-    annotations = None
     selected_episodes = list(range(len(episode_ends)))
-
-    if success_only:
-        annotations_path = Path(annotations_path)
-        if not annotations_path.exists():
-            raise FileNotFoundError(f"annotations.json 未找到: {annotations_path}")
-
-        annotations = json.loads(annotations_path.read_text())
-        annotation_map: dict[int, dict] = {}
-
-        if isinstance(annotations, list):
-            annotation_map = {idx: ann for idx, ann in enumerate(annotations)}
-        elif isinstance(annotations, dict):
-            for key, ann in annotations.items():
-                if isinstance(key, int):
-                    annotation_map[key] = ann
-                    continue
-                if not isinstance(key, str):
-                    continue
-                if key.isdigit():
-                    annotation_map[int(key)] = ann
-                    continue
-                match = re.search(r"\d+", key)
-                if match:
-                    annotation_map[int(match.group())] = ann
-        else:
-            raise ValueError("annotations.json 的格式应为 list 或 dict")
-
-        selected_episodes = []
-        missing_annotations = []
-        for ep_idx in range(len(episode_ends)):
-            ann = annotation_map.get(ep_idx)
-            if ann is None:
-                missing_annotations.append(ep_idx)
-                continue
-            if ann.get("is_success") is True:
-                selected_episodes.append(ep_idx)
-
-        if missing_annotations:
-            print(f"警告: 有 {len(missing_annotations)} 个 episode 缺少标注，将被跳过。")
-        print(f"成功轨迹数: {len(selected_episodes)} / {len(episode_ends)}")
-        if not selected_episodes:
-            raise ValueError("未找到标注为成功的轨迹，无法生成数据集。")
 
     # 创建 LeRobot 数据集
     dataset = LeRobotDataset.create(
@@ -133,8 +86,8 @@ def main(
                 "names": ["action"],
             },
         },
-        image_writer_threads=10,
-        image_writer_processes=5,
+        image_writer_threads=image_writer_threads,
+        image_writer_processes=image_writer_processes,
     )
 
     # 转换数据
@@ -144,17 +97,25 @@ def main(
         start_idx = episode_starts[ep_idx]
         end_idx = episode_ends[ep_idx]
 
-        for i in range(start_idx, end_idx):
-            # 拼接状态: pose + wrench
-            state = np.concatenate([tcp_pose[i], tcp_wrench[i]]).astype(np.float32)
+        # 批量预读取整个 episode 的数据（优化 I/O 性能）
+        d400_batch = d400_imgs[start_idx:end_idx]
+        l500_batch = l500_imgs[start_idx:end_idx]
+        tcp_pose_batch = tcp_pose[start_idx:end_idx]
+        tcp_wrench_batch = tcp_wrench[start_idx:end_idx]
+        actions_batch = actions[start_idx:end_idx]
 
-            dataset.add_frame({
-                "observation.images.d400": d400_imgs[i],
-                "observation.images.l500": l500_imgs[i],
-                "observation.state": state,
-                "action": actions[i].astype(np.float32),
-                "task": task,
-            })
+        for i in range(len(d400_batch)):
+            state = np.concatenate([tcp_pose_batch[i], tcp_wrench_batch[i]]).astype(np.float32)
+
+            dataset.add_frame(
+                {
+                    "observation.images.d400": d400_batch[i],
+                    "observation.images.l500": l500_batch[i],
+                    "observation.state": state,
+                    "action": actions_batch[i].astype(np.float32),
+                    "task": task,
+                }
+            )
 
         dataset.save_episode()
 

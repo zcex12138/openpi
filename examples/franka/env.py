@@ -162,6 +162,9 @@ class FrankaEnvironment(_environment.Environment):
         gripper = np.asarray(state[7:8], dtype=np.float32)
         wrench = np.asarray(state[8:14], dtype=np.float32)
         tcp_velocity = self._real_env.get_tcp_velocity()
+        action = self._real_env.get_last_target_action()
+        if action is None:
+            action = np.concatenate([tcp_pose, gripper], axis=0).astype(np.float32)
 
         try:
             frames, marker3d, timestamp_ns, seq = self._camera.get_frames_with_markers()
@@ -181,6 +184,7 @@ class FrankaEnvironment(_environment.Environment):
             "tcp_velocity": tcp_velocity,
             "wrench": wrench,
             "gripper": gripper,
+            "action": action,
         }
 
     @override

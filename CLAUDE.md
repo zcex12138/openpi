@@ -252,7 +252,6 @@ uv pip install -e packages/openpi-client && uv pip install tyro
 | `camera_service.py` | IPC 相机服务（Python 3.9） |
 | `camera_client.py` | 相机服务客户端 |
 | `pkl_recorder.py` | episode 级 PKL 录制器（运行时 Subscriber） |
-| `record_pkl.py` | 独立录制脚本（不运行 policy） |
 | `convert_pkl_to_lerobot.py` | PKL 转 LeRobot v2 数据集 |
 | `constants.py` | 默认配置常量（从 `camera_config.yaml` 加载） |
 | `visualize_online_trajectory.py` | 实时可视化 TCP 位姿与目标 |
@@ -271,9 +270,36 @@ uv pip install -e packages/openpi-client && uv pip install tyro
 ### 录制与转换（PKL）
 
 - 评估时加 `--record-pkl` 可启用 episode 级 PKL 录制，默认输出到 `eval_records/<config_name>/episode_###.pkl`。
-- 独立录制脚本：`examples/franka/record_pkl.py`（不运行 policy）。
 - 转换脚本：`examples/franka/convert_pkl_to_lerobot.py`，保持现有 LeRobot key；如需本地保存，设置 `HF_LEROBOT_HOME=/home/mpi/workspace/yhx/openpi/data/dataset`。
 
 ### 本地数据集路径
 - 使用 HF_LEROBOT_HOME 将默认数据集地址设置为本地
 `export HF_LEROBOT_HOME=/home/mpi/workspace/yhx/openpi/data/dataset`
+
+### Real-Time Chunking (RTC) 模式
+
+RTC 模式通过重叠推理与执行来降低有效控制延迟。在模型推理期间，机器人继续执行先前生成的动作，新 chunk 通过 prefix conditioning 保持时序一致性。
+
+**启用 RTC 模式**：
+```bash
+PYTHONPATH=/home/mpi/workspace/yhx/openpi python examples/franka/main.py \
+    --args.remote-host localhost --args.remote-port 8000 \
+    --args.rtc --args.rtc-inference-delay 3 --args.rtc-execute-horizon 5
+```
+
+**参数说明**：
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `--args.rtc` | false | 启用 Real-Time Chunking 模式 |
+| `--args.rtc-inference-delay` | 3 | 推理期间执行的旧 chunk 动作数 |
+| `--args.rtc-execute-horizon` | 5 | 每次迭代总执行动作数 |
+
+**工作原理**：
+1. 首次推理生成完整 action chunk (30 步)
+2. 执行前 `inference_delay` 个动作的同时，启动下一次推理
+3. 新 chunk 以正在执行的动作为前缀条件生成，保证轨迹连续性
+4. 融合新旧 chunk，循环执行
+
+**推荐配置**：
+- 推理延迟 ~100ms: `--args.rtc-inference-delay 3 --args.rtc-execute-horizon 5`
+- 推理延迟 ~200ms: `--args.rtc-inference-delay 5 --args.rtc-execute-horizon 8`

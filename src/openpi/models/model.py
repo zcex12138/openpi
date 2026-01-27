@@ -282,6 +282,21 @@ class BaseModel(nnx.Module, abc.ABC):
     @abc.abstractmethod
     def sample_actions(self, rng: at.KeyArrayLike, observation: Observation, **kwargs) -> Actions: ...
 
+    def realtime_sample_actions(
+        self,
+        rng: at.KeyArrayLike,
+        observation: Observation,
+        *,
+        action_prefix: at.Float[at.Array, "b p ad"] | None = None,
+        **kwargs,
+    ) -> Actions:
+        """Sample actions with prefix conditioning for real-time chunking.
+
+        Default implementation falls back to standard sampling.
+        Subclasses may override to provide prefix-conditioned sampling.
+        """
+        return self.sample_actions(rng, observation, **kwargs)
+
 
 def restore_params(
     params_path: pathlib.Path | str,

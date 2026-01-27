@@ -22,8 +22,8 @@ motion:
 
 # Impedance control parameters (only used when control.mode = "impedance")
 impedance:
-  translational_stiffness: 2000.0  # Translational stiffness (N/m)
-  rotational_stiffness: 110.0       # Rotational stiffness (Nm/rad)
+  translational_stiffness: 1900.0  # Translational stiffness (N/m)
+  rotational_stiffness: 100.0       # Rotational stiffness (Nm/rad)
 
 # Cartesian control parameters (only used when control.mode = "cartesian")
 cartesian:
@@ -40,7 +40,7 @@ gripper:
   open_width: 0.078            # Gripper open width (meters)
   grasp_width: 0.015           # Gripper grasp width (meters)
   velocity: 0.1                # Gripper velocity (m/s)
-  force: 30.0                  # Gripper grasp force (Newtons)
+  force: 50.0                  # Gripper grasp force (Newtons)
   close_threshold: 0.7         # Threshold for closing gripper (action value)
   open_threshold: 0.3          # Threshold for opening gripper (action value)
 
@@ -68,8 +68,15 @@ evaluation:
 
 # Teaching mode (for human guidance)
 teaching:
-  translational_stiffness: 500.0      # Translational stiffness (N/m), 0 = fully compliant
-  rotational_stiffness: 5.0         # Rotational stiffness (Nm/rad), 0 = fully compliant
-  load_mass: 0.3                    # End-effector load mass [kg]
-  load_com: [0.0, 0.0, 0.0]         # Load center of mass [m]
-  load_inertia: [0.001, 0, 0, 0, 0.001, 0, 0, 0, 0.001]  # Load inertia matrix [kg·m²]
+  # Per-axis stiffness: [X, Y, Z] - set individual axis to 0 for full compliance
+  translational_stiffness: [50.0, 50.0, 50.0]  # Translational stiffness per axis (N/m)
+  rotational_stiffness: [20.0, 0.0, 20.0]           # Rotational stiffness per axis (Nm/rad)
+  load_mass: 0.35                   # End-effector load mass [kg]
+  load_com: [0.0, 0.0, 0.03]         # Load center of mass [m]
+  load_inertia: [1.0, 0, 0, 0, 1.0, 0, 0, 0, 1.0]  # Load inertia matrix [kg·m²]
+
+# Real-Time Chunking (RTC) parameters
+rtc:
+  enabled: false          # Enable RTC mode by default
+  inference_delay: 5      # Actions executed during inference
+  execute_horizon: 10      # Total actions per iteration

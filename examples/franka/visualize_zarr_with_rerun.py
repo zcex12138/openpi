@@ -6,6 +6,7 @@ import gc
 import json
 import os
 import os.path as osp
+import re
 import signal
 import subprocess
 import uuid
@@ -25,6 +26,8 @@ import rerun_bindings
 
 class ZarrDatasetViewer:
     """Interactive viewer for zarr datasets with lazy loading."""
+
+    _XENSE_CANON_RE = re.compile(r"^xense[_-]?(\d+)(?:_camera)?$")
 
     def __init__(
         self,
@@ -55,16 +58,16 @@ class ZarrDatasetViewer:
         self._axes_logged = set()
 
         # Lazy load zarr (does not load data into memory)
-        logger.info(f'Opening zarr dataset: {zarr_path}')
+        logger.info(f"Opening zarr dataset: {zarr_path}")
         self._validate_zarr_path(zarr_path)
-        self.zarr_root = zarr.open(zarr_path, mode='r')
-        self.data_group = self.zarr_root['data']
-        self.meta_group = self.zarr_root.get('meta', {})
+        self.zarr_root = zarr.open(zarr_path, mode="r")
+        self.data_group = self.zarr_root["data"]
+        self.meta_group = self.zarr_root.get("meta", {})
 
         # Load only metadata (small)
         self.episode_ends = None
-        if 'episode_ends' in self.meta_group:
-            self.episode_ends = np.array(self.meta_group['episode_ends'][:])
+        if "episode_ends" in self.meta_group:
+            self.episode_ends = np.array(self.meta_group["episode_ends"][:])
             self.num_episodes = len(self.episode_ends)
         else:
             # Single episode mode
@@ -83,13 +86,20 @@ class ZarrDatasetViewer:
         self._log_dataset_structure()
 
         # Identify data keys by type
-        self.image_keys = [k for k in self.data_keys if 'img' in k.lower() or 'image' in k.lower() or 'camera' in k.lower()]
+        self.image_keys = [
+            k for k in self.data_keys if "img" in k.lower() or "image" in k.lower() or "camera" in k.lower()
+        ]
         # Support both old 'left_robot_*' and new 'robot_*' naming (exclude 'right_robot_*')
-        self.pose_keys = [k for k in self.data_keys if 'tcp_pose' in k.lower() and not k.startswith('right')]
-        self.marker3d_keys = [k for k in self.data_keys if 'marker3d' in k.lower()]
-        self.wrench_keys = [k for k in self.data_keys if 'wrench' in k.lower() and not k.startswith('right')]
-        self.vel_keys = [k for k in self.data_keys if 'vel' in k.lower() and 'tcp' in k.lower() and not k.startswith('right')]
-        self.gripper_width_keys = [k for k in self.data_keys if 'gripper_width' in k.lower() and not k.startswith('right')]
+        self.pose_keys = [k for k in self.data_keys if "tcp_pose" in k.lower() and not k.startswith("right")]
+        self.marker3d_keys = [k for k in self.data_keys if "marker3d" in k.lower()]
+        self.wrench_keys = [k for k in self.data_keys if "wrench" in k.lower() and not k.startswith("right")]
+        self.vel_keys = [
+            k for k in self.data_keys if "vel" in k.lower() and "tcp" in k.lower() and not k.startswith("right")
+        ]
+        self.gripper_width_keys = [
+            k for k in self.data_keys if "gripper_width" in k.lower() and not k.startswith("right")
+        ]
+        self.has_human_teaching = "is_human_teaching" in self.data_keys
 
         # Current episode data (for memory management)
         self._current_data: Optional[Dict[str, np.ndarray]] = None
@@ -104,23 +114,29 @@ class ZarrDatasetViewer:
         self.rec = None
         self._init_rerun()
 
-        logger.info(f'Dataset ready: {self.num_episodes} episodes')
+        logger.info(f"Dataset ready: {self.num_episodes} episodes")
         self._print_episode_summary()
+
+    def _canonicalize_camera_name(self, name: str) -> str:
+        if name.startswith("xense_camera_"):
+            return name
+        match = self._XENSE_CANON_RE.match(name)
+        if match:
+            return f"xense_camera_{int(match.group(1))}"
+        return name
 
     def _validate_zarr_path(self, zarr_path: str):
         """Validate that the path is a valid zarr store"""
         if osp.isdir(zarr_path):
-            if not osp.exists(osp.join(zarr_path, '.zgroup')):
-                raise FileNotFoundError(
-                    f"Directory '{zarr_path}' is not a Zarr store (.zgroup missing)."
-                )
+            if not osp.exists(osp.join(zarr_path, ".zgroup")):
+                raise FileNotFoundError(f"Directory '{zarr_path}' is not a Zarr store (.zgroup missing).")
 
     def _log_dataset_structure(self):
         """Log dataset structure without loading data"""
-        logger.info('Dataset structure:')
+        logger.info("Dataset structure:")
         for key in self.data_keys:
             arr = self.data_group[key]
-            logger.info(f'  {key}: shape={arr.shape}, dtype={arr.dtype}')
+            logger.info(f"  {key}: shape={arr.shape}, dtype={arr.dtype}")
 
     def _default_annotations_path(self, zarr_path: str) -> str:
         parent_dir = osp.dirname(osp.abspath(zarr_path.rstrip(osp.sep)))
@@ -172,31 +188,37 @@ class ZarrDatasetViewer:
             end = self.episode_ends[i]
             episode_lengths.append(end - start)
 
-        logger.info(f'Episode lengths: {episode_lengths}')
-        logger.info(f'Total frames: {self.episode_ends[-1]}')
+        logger.info(f"Episode lengths: {episode_lengths}")
+        logger.info(f"Total frames: {self.episode_ends[-1]}")
 
     def _get_blueprint(self):
         """Create rerun blueprint layout."""
         traj_origin = self._with_prefix("trajectory")
         tactile_origin = self._with_prefix("tactile_view")
-        action_origin = self._with_prefix("action")
+        state_origin = self._with_prefix("state")
         tcp_origin = self._with_prefix("tcp_pose")
+        human_teaching_origin = self._with_prefix("human_teaching")
         gripper_origin = self._with_prefix("gripper")
         wrench_origin = self._with_prefix("wrench")
         img_origin = self._with_prefix("images")
+
+        # Use human teaching panel if available, otherwise gripper
+        middle_panel_name = "Human Teaching" if self.has_human_teaching else "Gripper"
+        middle_panel_origin = human_teaching_origin if self.has_human_teaching else gripper_origin
+
         return rrb.Blueprint(
             rrb.Horizontal(
                 # Left column: 3D views + Action
                 rrb.Vertical(
                     rrb.Spatial3DView(name="Robot Trajectory", origin=traj_origin),
                     rrb.Spatial3DView(name="Tactile Markers", origin=tactile_origin),
-                    rrb.TimeSeriesView(name="Action", origin=action_origin),
+                    rrb.TimeSeriesView(name="State", origin=state_origin),
                     row_shares=[1, 1, 1],
                 ),
                 # Middle column: Time series
                 rrb.Vertical(
                     rrb.TimeSeriesView(name="TCP Position", origin=tcp_origin),
-                    rrb.TimeSeriesView(name="Gripper", origin=gripper_origin),
+                    rrb.TimeSeriesView(name=middle_panel_name, origin=middle_panel_origin),
                     rrb.TimeSeriesView(name="Forces & Torques", origin=wrench_origin),
                     row_shares=[1, 1, 1],
                 ),
@@ -373,7 +395,7 @@ class ZarrDatasetViewer:
         start_idx, end_idx = self.get_episode_range(episode_id)
         n_frames = end_idx - start_idx
 
-        logger.info(f'Loading episode {episode_id}: frames {start_idx}-{end_idx} ({n_frames} frames)')
+        logger.info(f"Loading episode {episode_id}: frames {start_idx}-{end_idx} ({n_frames} frames)")
 
         data = {}
         for key in tqdm(self.data_keys, desc="Loading episode", unit="array"):
@@ -411,9 +433,9 @@ class ZarrDatasetViewer:
         n_frames = end_idx - start_idx
         self._current_n_frames = n_frames
 
-        logger.info(f'\n{"="*50}')
-        logger.info(f'Visualizing Episode {episode_id} ({n_frames} frames)')
-        logger.info(f'{"="*50}')
+        logger.info(f"\n{'=' * 50}")
+        logger.info(f"Visualizing Episode {episode_id} ({n_frames} frames)")
+        logger.info(f"{'=' * 50}")
 
         self._cleanup_episode_data()
 
@@ -433,28 +455,28 @@ class ZarrDatasetViewer:
                 if pose_key not in data:
                     continue
                 poses = data[pose_key]
-                robot_name = pose_key.split('_')[0]
+                robot_name = pose_key.split("_")[0]
                 if poses.shape[1] >= 3:
                     positions = poses[:, :3]
                     rr_log.log(
                         self._with_prefix(f"trajectory/{robot_name}/path"),
                         LineStrips3D([positions], colors=[[100, 180, 255]], radii=[0.0012]),
-                        static=True
+                        static=True,
                     )
         action_positions = None
-        if 'action' in data:
-            action = data['action']
+        if "action" in data:
+            action = data["action"]
             if len(action.shape) == 2 and action.shape[1] >= 3:
                 action_positions = action[:, :3]
         if action_positions is not None:
-            action_robot_name = self.pose_keys[0].split('_')[0] if self.pose_keys else "robot"
+            action_robot_name = self.pose_keys[0].split("_")[0] if self.pose_keys else "robot"
             rr_log.log(
                 self._with_prefix(f"trajectory/{action_robot_name}/action_path"),
                 LineStrips3D([action_positions], colors=[[255, 140, 0]], radii=[0.0009]),
-                static=True
+                static=True,
             )
 
-        logger.info('Logging frames to rerun...')
+        logger.info("Logging frames to rerun...")
         for i in tqdm(range(n_frames), desc=f"Episode {episode_id}", unit="frame"):
             rr_log.set_time(self._timeline_name, sequence=i)
 
@@ -464,18 +486,19 @@ class ZarrDatasetViewer:
             self._log_wrench(rr_log, data, i)
             self._log_velocities(rr_log, data, i)
             self._log_gripper(rr_log, data, i)
+            self._log_human_teaching(rr_log, data, i)
             self._log_pose_components(rr_log, data, i)
-            self._log_action(rr_log, data, i)
+            self._log_state(rr_log, data, i)
             self._log_marker3d(rr_log, data, i)
 
-        logger.info(f'Episode {episode_id} visualization complete')
+        logger.info(f"Episode {episode_id} visualization complete")
         self._print_command_hints()
 
     def _print_command_hints(self):
         """Print available commands as a reminder"""
-        print("\n" + "-"*50)
+        print("\n" + "-" * 50)
         print("Commands: <number> | n(ext) | p(rev) | l(ist) | i(nfo) | r(eload) | a(nnotate) | q(uit)")
-        print("-"*50)
+        print("-" * 50)
 
     def _get_trajectory_id(self, episode_id: int) -> str:
         if self._trajectory_ids is None:
@@ -540,10 +563,10 @@ class ZarrDatasetViewer:
         total_frames = self._current_n_frames or (end_idx - start_idx)
         max_frame = max(total_frames - 1, 0)
 
-        print("\n" + "="*50)
+        print("\n" + "=" * 50)
         print(f"Annotating trajectory_id: {traj_id}")
         print(f"Total frames (0-based): {total_frames}")
-        print("="*50)
+        print("=" * 50)
 
         is_success = self._prompt_bool("is_success? (y/n): ")
         success_frame = None
@@ -585,20 +608,17 @@ class ZarrDatasetViewer:
             if pose_key not in data:
                 continue
             poses = data[pose_key]
-            robot_name = pose_key.split('_')[0]
+            robot_name = pose_key.split("_")[0]
             if poses.shape[1] >= 7:
                 translation = poses[frame_idx, :3]
                 rotation_quat = poses[frame_idx, 3:7]
 
                 rr_log.log(
                     self._with_prefix(f"robot/{robot_name}/tcp"),
-                    Transform3D(translation=translation, rotation=Quaternion(xyzw=rotation_quat))
+                    Transform3D(translation=translation, rotation=Quaternion(xyzw=rotation_quat)),
                 )
                 axes_entity = self._with_prefix(f"trajectory/{robot_name}/current_pose")
-                rr_log.log(
-                    axes_entity,
-                    Transform3D(translation=translation, rotation=Quaternion(xyzw=rotation_quat))
-                )
+                rr_log.log(axes_entity, Transform3D(translation=translation, rotation=Quaternion(xyzw=rotation_quat)))
                 if axes_entity not in self._axes_logged:
                     axis_len = 0.05
                     axis_radius = 0.002
@@ -624,19 +644,16 @@ class ZarrDatasetViewer:
 
     def _log_action_pose(self, rr_log, data: Dict, frame_idx: int):
         """Log action pose axes"""
-        if 'action' not in data:
+        if "action" not in data:
             return
-        action = data['action']
+        action = data["action"]
         if len(action.shape) != 2 or action.shape[1] < 7:
             return
         translation = action[frame_idx, :3]
         rotation_quat = action[frame_idx, 3:7]
-        robot_name = self.pose_keys[0].split('_')[0] if self.pose_keys else "robot"
+        robot_name = self.pose_keys[0].split("_")[0] if self.pose_keys else "robot"
         axes_entity = self._with_prefix(f"trajectory/{robot_name}/action_pose")
-        rr_log.log(
-            axes_entity,
-            Transform3D(translation=translation, rotation=Quaternion(xyzw=rotation_quat))
-        )
+        rr_log.log(axes_entity, Transform3D(translation=translation, rotation=Quaternion(xyzw=rotation_quat)))
         if axes_entity not in self._axes_logged:
             axis_len = 0.05
             axis_radius = 0.0018
@@ -667,7 +684,8 @@ class ZarrDatasetViewer:
                 continue
             images = data[img_key]
             if len(images.shape) == 4:
-                camera_name = img_key.replace('_img', '').replace('_image', '')
+                camera_name = img_key.replace("_img", "").replace("_image", "")
+                camera_name = self._canonicalize_camera_name(camera_name)
                 img = images[frame_idx]
                 if img.dtype != np.uint8:
                     img = (img * 255).astype(np.uint8) if img.max() <= 1.0 else img.astype(np.uint8)
@@ -679,15 +697,17 @@ class ZarrDatasetViewer:
             if wrench_key not in data:
                 continue
             wrenches = data[wrench_key]
-            robot_name = wrench_key.split('_')[0]
+            robot_name = wrench_key.split("_")[0]
             forces = wrenches[frame_idx, :3] if wrenches.shape[1] >= 3 else wrenches[frame_idx]
             torques = wrenches[frame_idx, 3:6] if wrenches.shape[1] >= 6 else np.zeros(3)
 
-            for axis_idx, axis_name in enumerate(['x', 'y', 'z']):
+            for axis_idx, axis_name in enumerate(["x", "y", "z"]):
                 if axis_idx < len(forces):
                     rr_log.log(self._with_prefix(f"wrench/{robot_name}/force_{axis_name}"), Scalars([forces[axis_idx]]))
                 if axis_idx < len(torques):
-                    rr_log.log(self._with_prefix(f"wrench/{robot_name}/torque_{axis_name}"), Scalars([torques[axis_idx]]))
+                    rr_log.log(
+                        self._with_prefix(f"wrench/{robot_name}/torque_{axis_name}"), Scalars([torques[axis_idx]])
+                    )
 
     def _log_velocities(self, rr_log, data: Dict, frame_idx: int):
         """Log velocity data"""
@@ -695,15 +715,21 @@ class ZarrDatasetViewer:
             if vel_key not in data:
                 continue
             velocities = data[vel_key]
-            robot_name = vel_key.split('_')[0]
+            robot_name = vel_key.split("_")[0]
             linear_vel = velocities[frame_idx, :3] if velocities.shape[1] >= 3 else velocities[frame_idx]
             angular_vel = velocities[frame_idx, 3:6] if velocities.shape[1] >= 6 else np.zeros(3)
 
-            for axis_idx, axis_name in enumerate(['x', 'y', 'z']):
+            for axis_idx, axis_name in enumerate(["x", "y", "z"]):
                 if axis_idx < len(linear_vel):
-                    rr_log.log(self._with_prefix(f"velocities/{robot_name}/linear_{axis_name}"), Scalars([linear_vel[axis_idx]]))
+                    rr_log.log(
+                        self._with_prefix(f"velocities/{robot_name}/linear_{axis_name}"),
+                        Scalars([linear_vel[axis_idx]]),
+                    )
                 if axis_idx < len(angular_vel):
-                    rr_log.log(self._with_prefix(f"velocities/{robot_name}/angular_{axis_name}"), Scalars([angular_vel[axis_idx]]))
+                    rr_log.log(
+                        self._with_prefix(f"velocities/{robot_name}/angular_{axis_name}"),
+                        Scalars([angular_vel[axis_idx]]),
+                    )
 
     def _log_gripper(self, rr_log, data: Dict, frame_idx: int):
         """Log gripper data"""
@@ -711,7 +737,7 @@ class ZarrDatasetViewer:
             if width_key not in data:
                 continue
             widths = data[width_key].flatten()
-            robot_name = width_key.split('_')[0]
+            robot_name = width_key.split("_")[0]
             rr_log.log(self._with_prefix(f"gripper/{robot_name}/width"), Scalars([widths[frame_idx]]))
 
         # Also log gripper state from 8D pose
@@ -720,8 +746,15 @@ class ZarrDatasetViewer:
                 continue
             poses = data[pose_key]
             if poses.shape[1] == 8:
-                robot_name = pose_key.split('_')[0]
+                robot_name = pose_key.split("_")[0]
                 rr_log.log(self._with_prefix(f"gripper/{robot_name}/state"), Scalars([poses[frame_idx, 7]]))
+
+    def _log_human_teaching(self, rr_log, data: Dict, frame_idx: int):
+        """Log human teaching flag"""
+        if "is_human_teaching" not in data:
+            return
+        value = float(data["is_human_teaching"][frame_idx])
+        rr_log.log(self._with_prefix("human_teaching/is_human"), Scalars([value]))
 
     def _log_pose_components(self, rr_log, data: Dict, frame_idx: int):
         """Log TCP pose position components"""
@@ -729,7 +762,7 @@ class ZarrDatasetViewer:
             if pose_key not in data:
                 continue
             poses = data[pose_key]
-            robot_name = pose_key.split('_')[0]
+            robot_name = pose_key.split("_")[0]
             if poses.shape[1] >= 3:
                 rr_log.log(self._with_prefix(f"tcp_pose/{robot_name}/position/x"), Scalars([poses[frame_idx, 0]]))
                 rr_log.log(self._with_prefix(f"tcp_pose/{robot_name}/position/y"), Scalars([poses[frame_idx, 1]]))
@@ -737,11 +770,32 @@ class ZarrDatasetViewer:
 
     def _log_action(self, rr_log, data: Dict, frame_idx: int):
         """Log action data"""
-        if 'action' not in data:
+        if "action" not in data:
             return
-        action = data['action'][frame_idx]
+        action = data["action"][frame_idx]
         for dim in range(min(len(action), 10)):
             rr_log.log(self._with_prefix(f"action/dim_{dim}"), Scalars([action[dim]]))
+
+    def _log_state(self, rr_log, data: Dict, frame_idx: int):
+        """Log state data"""
+        state_vec = None
+        tcp_pose = data.get("robot_tcp_pose")
+        if tcp_pose is None:
+            for pose_key in self.pose_keys:
+                tcp_pose = data.get(pose_key)
+                if tcp_pose is not None:
+                    break
+
+        if tcp_pose is not None:
+            state_vec = tcp_pose[frame_idx].reshape(-1)[:7]
+        elif "state" in data:
+            state_vec = np.asarray(data["state"][frame_idx]).reshape(-1)[:7]
+
+        if state_vec is None:
+            return
+
+        for dim in range(len(state_vec)):
+            rr_log.log(self._with_prefix(f"state/dim_{dim}"), Scalars([state_vec[dim]]))
 
     def _log_marker3d(self, rr_log, data: Dict, frame_idx: int):
         """Log marker3d data"""
@@ -749,7 +803,8 @@ class ZarrDatasetViewer:
             if marker3d_key not in data:
                 continue
             marker3d_frame = data[marker3d_key][frame_idx]
-            camera_name = marker3d_key.replace('_marker3d', '')
+            camera_name = marker3d_key.replace("_marker3d", "")
+            camera_name = self._canonicalize_camera_name(camera_name)
 
             points_3d = self._process_marker3d_to_points(marker3d_frame, camera_idx)
             if points_3d is not None:
@@ -761,7 +816,7 @@ class ZarrDatasetViewer:
         camera_idx: int = 0,
         camera_offset_x: float = 0.0,
         camera_offset_z: float = 300.0,
-        scale_z: float = 0.1
+        scale_z: float = 0.1,
     ) -> Optional[np.ndarray]:
         """Convert marker3d data to 3D point cloud for visualization
 
@@ -820,15 +875,15 @@ class ZarrDatasetViewer:
 
     def list_episodes(self):
         """Print list of all episodes with their lengths"""
-        print(f"\n{'='*50}")
+        print(f"\n{'=' * 50}")
         print(f"Episodes in dataset: {self.num_episodes}")
-        print(f"{'='*50}")
+        print(f"{'=' * 50}")
         for i in range(self.num_episodes):
             start, end = self.get_episode_range(i)
             length = end - start
             marker = " <-- current" if i == self.current_episode else ""
             print(f"  Episode {i:4d}: {length:6d} frames (indices {start:7d} - {end:7d}){marker}")
-        print(f"{'='*50}\n")
+        print(f"{'=' * 50}\n")
 
     def show_info(self):
         """Show info about current episode"""
@@ -846,51 +901,51 @@ class ZarrDatasetViewer:
         Args:
             start_episode: Episode to start with
         """
-        print("\n" + "="*50)
+        print("\n" + "=" * 50)
         print("Interactive Zarr Viewer")
         print(f"Dataset: {self.zarr_path}")
         print(f"Episodes: {self.num_episodes}")
         print(f"Annotation: {self.annotations_path}")
-        print("="*50)
+        print("=" * 50)
 
         # Visualize initial episode (will print command hints after)
         self.visualize_episode(start_episode, first_run=True)
 
         while True:
             try:
-                cmd = input(f"Episode [{self.current_episode}/{self.num_episodes-1}] > ").strip().lower()
+                cmd = input(f"Episode [{self.current_episode}/{self.num_episodes - 1}] > ").strip().lower()
 
                 if not cmd:
                     continue
 
-                if cmd in ('q', 'quit', 'exit'):
+                if cmd in ("q", "quit", "exit"):
                     print("Exiting...")
                     break
 
-                elif cmd in ('n', 'next'):
+                elif cmd in ("n", "next"):
                     next_ep = self.current_episode + 1
                     if next_ep >= self.num_episodes:
                         print(f"Already at last episode ({self.current_episode})")
                     else:
                         self.visualize_episode(next_ep)
 
-                elif cmd in ('p', 'prev', 'previous'):
+                elif cmd in ("p", "prev", "previous"):
                     prev_ep = self.current_episode - 1
                     if prev_ep < 0:
                         print(f"Already at first episode (0)")
                     else:
                         self.visualize_episode(prev_ep)
 
-                elif cmd in ('l', 'list'):
+                elif cmd in ("l", "list"):
                     self.list_episodes()
 
-                elif cmd in ('i', 'info'):
+                elif cmd in ("i", "info"):
                     self.show_info()
 
-                elif cmd in ('r', 'reload'):
+                elif cmd in ("r", "reload"):
                     self.visualize_episode(self.current_episode)
 
-                elif cmd in ('a', 'annotate'):
+                elif cmd in ("a", "annotate"):
                     self.annotate_current_episode()
 
                 elif cmd.isdigit():
@@ -919,7 +974,7 @@ class ZarrDatasetViewer:
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Interactive zarr dataset visualizer using rerun',
+        description="Interactive zarr dataset visualizer using rerun",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Interactive Commands:
@@ -935,29 +990,19 @@ Interactive Commands:
 Example:
   python visualize_zarr_with_rerun.py --zarr_path ./data/replay_buffer.zarr
   python visualize_zarr_with_rerun.py --zarr_path ./data/replay_buffer.zarr --episode 5
-        """
+        """,
     )
 
     parser.add_argument(
-        '--zarr_path',
+        "--zarr_path",
         type=str,
-        default='eval_records/pi05_franka_position_control_lora/replay_buffer.zarr',
-        help='Path to zarr dataset file'
+        default="eval_records/pi05_franka_position_control_lora/20260126/replay_buffer.zarr",
+        help="Path to zarr dataset file",
     )
 
-    parser.add_argument(
-        '--fps',
-        type=float,
-        default=30.0,
-        help='Playback frame rate'
-    )
+    parser.add_argument("--fps", type=float, default=30.0, help="Playback frame rate")
 
-    parser.add_argument(
-        '--episode', '-e',
-        type=int,
-        default=0,
-        help='Starting episode ID (0-indexed)'
-    )
+    parser.add_argument("--episode", "-e", type=int, default=14, help="Starting episode ID (0-indexed)")
 
     args = parser.parse_args()
 
@@ -974,5 +1019,5 @@ Example:
         viewer.cleanup()
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

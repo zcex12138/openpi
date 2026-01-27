@@ -131,6 +131,64 @@ class Policy(BasePolicy):
             outputs["__openpi_processed_inputs"] = processed_inputs
         return outputs
 
+    def infer_realtime(
+        self,
+        obs: dict,
+        *,
+        action_prefix: np.ndarray | None = None,
+        noise: np.ndarray | None = None,
+    ) -> dict:
+        """Inference with prefix conditioning for real-time chunking.
+
+        Args:
+            obs: Observation dictionary.
+            action_prefix: Previously executed actions to condition on.
+                Shape [prefix_len, action_dim]. If None, falls back to standard inference.
+            noise: Optional fixed noise for reproducibility.
+
+        Returns:
+            Dictionary with 'actions', 'state', and 'policy_timing'.
+        """
+        if action_prefix is None:
+            return self.infer(obs, noise=noise)
+
+        inputs = jax.tree.map(lambda x: x, obs)
+        inputs = self._input_transform(inputs)
+
+        if self._is_pytorch_model:
+            inputs = jax.tree.map(lambda x: torch.from_numpy(np.array(x)).to(self._pytorch_device)[None, ...], inputs)
+            prefix_tensor = torch.from_numpy(action_prefix).to(self._pytorch_device)[None, ...]
+            sample_rng = self._pytorch_device
+        else:
+            inputs = jax.tree.map(lambda x: jnp.asarray(x)[np.newaxis, ...], inputs)
+            prefix_tensor = jnp.asarray(action_prefix)[np.newaxis, ...]
+            self._rng, sample_rng = jax.random.split(self._rng)
+
+        sample_kwargs = dict(self._sample_kwargs)
+        sample_kwargs["action_prefix"] = prefix_tensor
+        if noise is not None:
+            noise_tensor = torch.from_numpy(noise).to(self._pytorch_device) if self._is_pytorch_model else jnp.asarray(noise)
+            if noise_tensor.ndim == 2:
+                noise_tensor = noise_tensor[None, ...]
+            sample_kwargs["noise"] = noise_tensor
+
+        observation = _model.Observation.from_dict(inputs)
+        start_time = time.monotonic()
+        actions = self._model.realtime_sample_actions(sample_rng, observation, **sample_kwargs)
+        model_time = time.monotonic() - start_time
+
+        if self._is_pytorch_model:
+            actions = np.asarray(actions[0, ...].detach().cpu())
+            state = np.asarray(inputs["state"][0, ...].detach().cpu())
+        else:
+            actions = np.asarray(actions[0, ...])
+            state = np.asarray(inputs["state"][0, ...])
+
+        outputs = {"state": state, "actions": actions}
+        outputs = self._output_transform(outputs)
+        outputs["policy_timing"] = {"infer_ms": model_time * 1000}
+        return outputs
+
     def _maybe_dump_images(self, inputs: dict) -> None:
         if not self._allow_dump_images:
             return

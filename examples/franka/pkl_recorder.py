@@ -202,6 +202,7 @@ class EpisodePklRecorder(_subscriber.Subscriber):
             "tcp_velocity": np.asarray(sample.get("tcp_velocity", np.zeros(6, dtype=np.float32)), dtype=np.float32),
             "wrench": np.asarray(sample.get("wrench", np.zeros(6, dtype=np.float32)), dtype=np.float32),
             "gripper": np.asarray(sample.get("gripper", np.zeros(1, dtype=np.float32)), dtype=np.float32),
+            "action": np.asarray(sample.get("action", np.zeros(8, dtype=np.float32)), dtype=np.float32),
             "is_human_teaching": self._env.is_teaching_mode,
         }
         self._frame_index += 1

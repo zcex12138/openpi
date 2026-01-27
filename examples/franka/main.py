@@ -35,6 +35,7 @@ import time
 import numpy as np
 from openpi_client import action_chunk_broker
 from openpi_client import websocket_client_policy as _websocket_client_policy
+from openpi_client.realtime_chunk_broker import RealTimeChunkBroker, RTCConfig
 from openpi_client.runtime import runtime as _runtime
 from openpi_client.runtime.agents import policy_agent as _policy_agent
 import tyro
@@ -44,6 +45,7 @@ from examples.franka import constants
 from examples.franka import env as _env
 from examples.franka import real_env as _real_env
 from examples.franka import pkl_recorder as _pkl_recorder
+from examples.franka import camera_visualizer as _camera_visualizer
 from examples.franka.keyboard_utils import cbreak_terminal
 
 logger = logging.getLogger(__name__)
@@ -95,6 +97,17 @@ class Args:
     record_dir: str = "eval_records"
     record_fps: float = 30.0
     record_queue_size: int = 256
+
+    # Real-Time Chunking (RTC)
+    rtc: bool = False  # Enable real-time chunking mode
+    rtc_inference_delay: int = 3  # Actions executed during inference
+    rtc_execute_horizon: int = 5  # Total actions per iteration
+
+    # Visualization (optional)
+    visualize: bool = False  # Enable camera visualization during evaluation
+    visualize_keys: tuple[str, ...] = ("xense_1_rgb",)  # Camera keys to display
+    visualize_fps: float = 30.0  # Visualization refresh rate
+    visualize_scale: float = 1.0  # Window scale factor
 
 
 def _create_local_policy(checkpoint_dir: str, config_name: str) -> tuple[object, object]:
@@ -176,11 +189,22 @@ def main(args: Args) -> None:
         policy, cfg = _create_local_policy(args.checkpoint_dir, args.config)  # type: ignore[arg-type]
         action_horizon = args.open_loop_horizon or cfg.model.action_horizon
 
-    # Create action chunk broker
-    chunked_policy = action_chunk_broker.ActionChunkBroker(
-        policy=policy,
-        action_horizon=action_horizon,
-    )
+    # Create action chunk broker (standard or RTC mode)
+    if args.rtc:
+        logger.info("Using Real-Time Chunking mode (inference_delay=%d, execute_horizon=%d)",
+                    args.rtc_inference_delay, args.rtc_execute_horizon)
+        rtc_config = RTCConfig(
+            action_horizon=action_horizon,
+            inference_delay=args.rtc_inference_delay,
+            execute_horizon=args.rtc_execute_horizon,
+            control_hz=args.control_fps if args.control_fps else _default_config.control_fps,
+        )
+        chunked_policy = RealTimeChunkBroker(policy=policy, config=rtc_config)
+    else:
+        chunked_policy = action_chunk_broker.ActionChunkBroker(
+            policy=policy,
+            action_horizon=action_horizon,
+        )
 
     # Create robot environment (loads from real_env_config.yaml by default)
     real_env = _real_env.FrankaRealEnv(
@@ -221,6 +245,16 @@ def main(args: Args) -> None:
             prompt=args.prompt,
         )
         subscribers.append(_pkl_recorder.EpisodePklRecorder(environment, recorder_config))
+    if args.visualize:
+        visualizer_config = _camera_visualizer.VisualizerConfig(
+            camera_host=args.camera_host,
+            camera_port=args.camera_port,
+            camera_timeout_s=args.camera_timeout_s,
+            display_keys=list(args.visualize_keys),
+            display_fps=args.visualize_fps,
+            window_scale=args.visualize_scale,
+        )
+        subscribers.append(_camera_visualizer.CameraVisualizer(visualizer_config))
 
     # Create runtime
     runtime = _runtime.Runtime(

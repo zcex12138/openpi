@@ -28,23 +28,32 @@ def main():
 
         print("Connected! Press 'q' to quit.")
 
-        frame_count = 0
+        req_count = 0
+        new_count = 0
+        last_key: tuple[int, int] | None = None
         last_fps_time = time.perf_counter()
         last_print_time = last_fps_time
-        current_fps = 0.0
+        req_hz = 0.0
+        new_hz = 0.0
         while True:
             try:
-                frames, _, _ = client.get_frames()
-                frame_count += 1
+                frames, timestamp_ns, seq = client.get_frames()
+                req_count += 1
+                key = (seq, timestamp_ns)
+                if last_key != key:
+                    new_count += 1
+                    last_key = key
 
                 now = time.perf_counter()
                 elapsed = now - last_fps_time
                 if elapsed >= 1.0:
-                    current_fps = frame_count / elapsed
-                    frame_count = 0
+                    req_hz = req_count / elapsed
+                    new_hz = new_count / elapsed
+                    req_count = 0
+                    new_count = 0
                     last_fps_time = now
                 if now - last_print_time >= 1.0:
-                    print(f"FPS: {current_fps:.2f}")
+                    print(f"RPC_HZ: {req_hz:.2f} | NEW_HZ: {new_hz:.2f} | seq={seq}")
                     last_print_time = now
 
                 # Get RGB frames from both cameras

@@ -91,9 +91,9 @@ class RealEnvConfig:
     num_episodes: int = 10
     default_prompt: str = "open the can with the screwdriver"
 
-    # Teaching mode
-    teaching_translational_stiffness: float = 0.0
-    teaching_rotational_stiffness: float = 0.0
+    # Teaching mode (per-axis stiffness: [X, Y, Z])
+    teaching_translational_stiffness: list[float] = field(default_factory=lambda: [0.0, 0.0, 0.0])
+    teaching_rotational_stiffness: list[float] = field(default_factory=lambda: [0.0, 0.0, 0.0])
     teaching_load_mass: float = 0.3
     teaching_load_com: list[float] = field(default_factory=lambda: [0.0, 0.0, 0.0])
     teaching_load_inertia: list[float] = field(
@@ -153,9 +153,9 @@ class RealEnvConfig:
             max_episode_time=get_nested(cfg, ["evaluation", "max_episode_time"], 30.0),
             num_episodes=get_nested(cfg, ["evaluation", "num_episodes"], 10),
             default_prompt=get_nested(cfg, ["evaluation", "default_prompt"], "open the can with the screwdriver"),
-            # Teaching mode
-            teaching_translational_stiffness=get_nested(cfg, ["teaching", "translational_stiffness"], 0.0),
-            teaching_rotational_stiffness=get_nested(cfg, ["teaching", "rotational_stiffness"], 0.0),
+            # Teaching mode (per-axis stiffness)
+            teaching_translational_stiffness=get_nested(cfg, ["teaching", "translational_stiffness"], [0.0, 0.0, 0.0]),
+            teaching_rotational_stiffness=get_nested(cfg, ["teaching", "rotational_stiffness"], [0.0, 0.0, 0.0]),
             teaching_load_mass=get_nested(cfg, ["teaching", "load_mass"], 0.3),
             teaching_load_com=get_nested(cfg, ["teaching", "load_com"], _default_load_com),
             teaching_load_inertia=get_nested(cfg, ["teaching", "load_inertia"], _default_load_inertia),
@@ -254,6 +254,7 @@ class FrankaRealEnv:
         self._last_gripper_target: float | None = None  # 0.0=open, 1.0=closed
         self._last_sent_quaternion: np.ndarray | None = None
         self._last_target_affine: Affine | None = None
+        self._last_target_action: np.ndarray | None = None
 
         _gripper_interp_duration = (
             gripper_interpolation_duration if gripper_interpolation_duration is not None
@@ -337,6 +338,11 @@ class FrankaRealEnv:
         if velocity is None:
             return np.zeros((6,), dtype=np.float32)
         return np.asarray(velocity, dtype=np.float32)
+
+    def get_last_target_action(self) -> np.ndarray | None:
+        if self._last_target_action is None:
+            return None
+        return self._last_target_action.copy()
 
     def execute_action(self, action: np.ndarray) -> np.ndarray:
         """Execute action on robot with safety checks.
@@ -438,7 +444,8 @@ class FrankaRealEnv:
             if self._waypoint_motion is None:
                 raise RuntimeError("Waypoint motion not initialized")
             self._waypoint_motion.set_next_waypoint(Waypoint(target_affine))
-            self._last_target_affine = target_affine
+        self._last_target_affine = target_affine
+        self._last_target_action = executed_action.copy()
 
         # Send gripper command separately (rate-limited + busy-aware)
         # self._maybe_send_gripper_command(gripper)
@@ -737,9 +744,12 @@ class FrankaRealEnv:
         except Exception as e:
             logger.warning("set_load failed (robot may sag): %s", e)
 
-        self._impedance_motion = ImpedanceMotion(
-            self._config.teaching_translational_stiffness,
-            self._config.teaching_rotational_stiffness,
+        trans_stiffness = self._config.teaching_translational_stiffness
+        rot_stiffness = self._config.teaching_rotational_stiffness
+        self._impedance_motion = ImpedanceMotion(trans_stiffness, rot_stiffness)
+        logger.info(
+            "Teaching stiffness: translational=%s, rotational=%s",
+            trans_stiffness, rot_stiffness,
         )
         current_affine = self._get_current_affine(force_robot_state=True)
         self._impedance_motion.target = current_affine

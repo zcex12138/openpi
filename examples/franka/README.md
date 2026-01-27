@@ -64,14 +64,6 @@ uv run examples/franka/main.py \
 
 ### 5. PKL 录制与转换（可选）
 
-**独立录制（不运行 policy）**：
-```bash
-PYTHONPATH=/home/mpi/workspace/yhx/openpi python examples/franka/record_pkl.py \
-    --record-dir eval_records \
-    --record-fps 30 \
-    --num-episodes 1
-```
-
 **转换为 LeRobot v2 数据集**：
 ```bash
 PYTHONPATH=/home/mpi/workspace/yhx/openpi python examples/franka/convert_pkl_to_lerobot.py \

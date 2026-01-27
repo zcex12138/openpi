@@ -20,7 +20,7 @@ import numpy as np
 import tyro
 import zarr
 
-_DEFAULT_RECORDS = "/home/mpi/workspace/yhx/openpi/eval_records/pi05_franka_position_control_lora"
+_DEFAULT_RECORDS = "/home/mpi/workspace/yhx/openpi/eval_records/pi05_franka_position_control_lora/20260126"
 
 
 @dataclasses.dataclass
@@ -62,6 +62,8 @@ def _process_episode(episode: dict) -> dict[str, np.ndarray] | None:
     tcp_pose_arr = np.zeros((n, 8), dtype=np.float32)
     tcp_wrench_arr = np.zeros((n, 6), dtype=np.float32)
     action_arr = np.zeros((n, 8), dtype=np.float32)
+    is_human_teaching_arr = np.zeros(n, dtype=np.uint8)
+    has_action = False
 
     for i, frame in enumerate(frames):
         images = frame.get("images", {})
@@ -82,10 +84,18 @@ def _process_episode(episode: dict) -> dict[str, np.ndarray] | None:
 
         tcp_pose_arr[i] = np.concatenate([tcp_pose, [gripper]])
         tcp_wrench_arr[i] = wrench
+        is_human_teaching_arr[i] = 1 if frame.get("is_human_teaching", False) else 0
+        frame_action = frame.get("action")
+        if frame_action is not None:
+            action_vec = np.asarray(frame_action, dtype=np.float32).reshape(-1)
+            if action_vec.size == 8:
+                action_arr[i] = action_vec
+                has_action = True
 
-    # action = next frame's pose (shift by 1)
-    action_arr[:-1] = tcp_pose_arr[1:]
-    action_arr[-1] = tcp_pose_arr[-1]
+    if not has_action:
+        # action = next frame's pose (shift by 1)
+        action_arr[:-1] = tcp_pose_arr[1:]
+        action_arr[-1] = tcp_pose_arr[-1]
 
     result = {
         "timestamp": timestamp_arr,
@@ -94,6 +104,7 @@ def _process_episode(episode: dict) -> dict[str, np.ndarray] | None:
         "robot_tcp_pose": tcp_pose_arr,
         "robot_tcp_wrench": tcp_wrench_arr,
         "action": action_arr,
+        "is_human_teaching": is_human_teaching_arr,
     }
 
     # xense1 image (only if non-empty)
@@ -169,6 +180,7 @@ def main(args: Args) -> None:
             zarr_data.create_dataset("robot_tcp_pose", data=ep_data["robot_tcp_pose"], chunks=(10000, 8), dtype="float32", compressor=compressor)
             zarr_data.create_dataset("robot_tcp_wrench", data=ep_data["robot_tcp_wrench"], chunks=(10000, 6), dtype="float32", compressor=compressor)
             zarr_data.create_dataset("action", data=ep_data["action"], chunks=(10000, 8), dtype="float32", compressor=compressor)
+            zarr_data.create_dataset("is_human_teaching", data=ep_data["is_human_teaching"], chunks=(10000,), dtype="uint8", compressor=compressor)
             if "xense1_camera_img" in ep_data:
                 xense1_shape = ep_data["xense1_camera_img"].shape[1:]
                 zarr_data.create_dataset("xense1_camera_img", data=ep_data["xense1_camera_img"], chunks=(100,) + xense1_shape, dtype="uint8", compressor=compressor)
@@ -183,6 +195,7 @@ def main(args: Args) -> None:
             zarr_data["robot_tcp_pose"].append(ep_data["robot_tcp_pose"])
             zarr_data["robot_tcp_wrench"].append(ep_data["robot_tcp_wrench"])
             zarr_data["action"].append(ep_data["action"])
+            zarr_data["is_human_teaching"].append(ep_data["is_human_teaching"])
             if "xense1_camera_img" in ep_data and "xense1_camera_img" in zarr_data:
                 zarr_data["xense1_camera_img"].append(ep_data["xense1_camera_img"])
             if "xense1_marker3d" in ep_data and "xense1_marker3d" in zarr_data:
