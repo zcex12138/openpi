@@ -136,18 +136,35 @@ def test_shifted_state_to_action_basic():
 
 
 def test_shifted_state_to_action_with_shift():
-    """Test additional frame offset for latency compensation."""
-    # Create state with identifiable values in each frame
-    state = np.arange(30 * 14).reshape(30, 14)
+    """Test additional frame offset for latency compensation using slicing."""
+    # With action_horizon=30 and shift=1, data_loader loads 31 frames
+    # ShiftedStateToAction slices state[1:] to get 30 frames as action targets
+    state = np.arange(31 * 14).reshape(31, 14)  # 31 frames (action_horizon + shift)
 
     transform = _transforms.ShiftedStateToAction(additional_shift=1)
     result = transform({"observation/state": state})
 
-    # First 29 actions should be the next frame's state
-    np.testing.assert_array_equal(result["actions"][:-1], state[1:, :8])
-    # Last action should be padded with the last valid frame (state[29])
-    # since there's no state[30] to shift to
-    np.testing.assert_array_equal(result["actions"][-1], state[-1, :8])
+    # After slicing state[1:], we get frames 1-30, which become 30 action targets
+    assert result["actions"].shape == (30, 8)
+    np.testing.assert_array_equal(result["actions"], state[1:, :8])
+
+
+def test_shifted_state_to_action_with_large_shift():
+    """Test slicing with larger shift (10 frames) for impedance control latency."""
+    # With action_horizon=30 and shift=10, data_loader loads 40 frames
+    # ShiftedStateToAction slices state[10:] to get 30 frames as action targets
+    state = np.arange(40 * 14).reshape(40, 14)  # 40 frames (action_horizon + shift)
+
+    transform = _transforms.ShiftedStateToAction(additional_shift=10)
+    result = transform({"observation/state": state})
+
+    # After slicing state[10:], we get frames 10-39, which become 30 action targets
+    assert result["actions"].shape == (30, 8)
+    np.testing.assert_array_equal(result["actions"], state[10:, :8])
+
+    # Verify no padding - last action should NOT equal second-to-last
+    # (This was a problem with the old roll+padding approach)
+    assert not np.array_equal(result["actions"][-1], result["actions"][-2])
 
 
 def test_shifted_state_to_action_custom_dims():
@@ -166,9 +183,7 @@ def test_shifted_state_to_action_custom_keys():
     """Test custom state/action key names."""
     state = np.ones((30, 14))
 
-    transform = _transforms.ShiftedStateToAction(
-        state_key="custom/state", action_key="custom/actions"
-    )
+    transform = _transforms.ShiftedStateToAction(state_key="custom/state", action_key="custom/actions")
     result = transform({"custom/state": state})
 
     assert "custom/actions" in result

@@ -91,6 +91,9 @@ class DataConfig:
     # If true, will use the LeRobot dataset task to define the prompt.
     prompt_from_task: bool = False
 
+    # Number of extra frames to load for state-to-action shift.
+    state_to_action_shift: int = 0
+
     # Only used for RLDS data loader (ie currently only used for DROID).
     rlds_data_dir: str | None = None
     # Action space for DROID dataset.
@@ -442,8 +445,8 @@ class LeRobotFrankaDataConfigV2(DataConfigFactory):
     dataset_state_dim: int | None = 7
 
     # Number of additional frames to shift forward for latency compensation.
-    # 1 frame at 30Hz ≈ 33ms latency compensation.
-    state_to_action_shift: int = 1
+    # 10 frames at 30Hz ≈ 333ms latency compensation.
+    state_to_action_shift: int = 10
 
     repack_transforms: tyro.conf.Suppress[_transforms.Group] = dataclasses.field(
         default=_transforms.Group(
@@ -499,6 +502,7 @@ class LeRobotFrankaDataConfigV2(DataConfigFactory):
             model_transforms=model_transforms,
             # Critical: tell LeRobot to load state sequences (not action sequences)
             action_sequence_keys=("observation.state",),
+            state_to_action_shift=self.state_to_action_shift,
         )
 
 
@@ -924,9 +928,8 @@ _CONFIGS = [
         data=LeRobotFrankaDataConfigV2(
             repo_id="2026_0105_pi05_franka_cola_lerobot_v2.0",
             base_config=DataConfig(prompt_from_task=True),
-            dataset_action_dim=8,  # 7D pose + 1D gripper
-            dataset_state_dim=7,  # Only use pose for state input (user choice)
-            state_to_action_shift=1,  # 1 frame shift for latency compensation (~33ms @ 30Hz)
+            dataset_action_dim=8,
+            dataset_state_dim=7,
             default_prompt="open the can with the screwdriver",
         ),
         weight_loader=weight_loaders.CheckpointWeightLoader("./data/checkpoints/pi05_base/params"),
@@ -964,9 +967,8 @@ _CONFIGS = [
         data=LeRobotFrankaDataConfigV2(
             repo_id="2026_0126_pi05_franka_cola_lerobot_v2.0",
             base_config=DataConfig(prompt_from_task=True),
-            dataset_action_dim=8,  # 7D pose + 1D gripper
-            dataset_state_dim=7,  # Only use pose for state input
-            state_to_action_shift=1,  # 1 frame shift for latency compensation (~33ms @ 30Hz)
+            dataset_action_dim=8,
+            dataset_state_dim=7,
             default_prompt="open the can with the screwdriver",
         ),
         # Load weights from the trained checkpoint

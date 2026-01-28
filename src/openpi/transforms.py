@@ -291,10 +291,7 @@ class ShiftedStateToAction(DataTransformFn):
 
         # Apply additional forward shift if needed (e.g., to compensate for latency)
         if self.additional_shift > 0:
-            # Roll forward, padding last frames with second-to-last frame
-            state = np.roll(state, -self.additional_shift, axis=0)
-            # Fill the rolled-over frames at the end
-            state[-self.additional_shift :] = state[-self.additional_shift - 1]
+            state = state[self.additional_shift :]
 
         # Extract pose dimensions as actions
         actions = state[..., self.pose_dims].copy()  # shape: [action_horizon, action_dim]
