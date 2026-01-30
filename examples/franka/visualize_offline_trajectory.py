@@ -11,6 +11,7 @@ import argparse
 from collections.abc import Iterable
 import logging
 from pathlib import Path
+import signal
 import sys
 
 import matplotlib.pyplot as plt
@@ -96,9 +97,7 @@ def _quat_to_rotmat_with_nan(quat: Iterable[float]) -> np.ndarray:
     return _quat_to_rotmat(q[:4])
 
 
-def _extract_poses(
-    records: np.ndarray, *, max_steps: int
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+def _extract_poses(records: np.ndarray, *, max_steps: int) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     tcp_positions = []
     tcp_quaternions = []
     target_positions = []
@@ -144,9 +143,7 @@ def _extract_poses(
     )
 
 
-def _compute_bounds(
-    tcp_positions: np.ndarray, target_positions: np.ndarray
-) -> tuple[np.ndarray, np.ndarray]:
+def _compute_bounds(tcp_positions: np.ndarray, target_positions: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     points = [tcp_positions]
     if target_positions.ndim == 3:
         flat_targets = target_positions.reshape(-1, 3)
@@ -227,15 +224,13 @@ def main() -> None:
         logger.error("target-steps must be >= 1")
         sys.exit(1)
 
-    tcp_positions, tcp_quats, target_positions, target_quats = _extract_poses(
-        records, max_steps=args.target_steps
-    )
+    tcp_positions, tcp_quats, target_positions, target_quats = _extract_poses(records, max_steps=args.target_steps)
     n_frames = tcp_positions.shape[0]
 
     fig = plt.figure(figsize=(9, 7))
     ax = fig.add_subplot(111, projection="3d")
     fig.suptitle(args.title, fontsize=14, fontweight="bold")
-    plt.subplots_adjust(bottom=0.18)
+    plt.subplots_adjust(bottom=0.22)
 
     # Bounds
     if args.use_workspace:
@@ -283,7 +278,7 @@ def main() -> None:
 
     # Dynamic lines and points
     (tcp_line,) = ax.plot([], [], [], color="#377eb8", linewidth=2, label="TCP")
-    (target_line,) = ax.plot([], [], [], color="#ff7f0e", linewidth=2, label="Target step1")
+    (target_line,) = ax.plot([], [], [], color="#ff7f0e", linewidth=2, label="Target (selected)")
     (tcp_point,) = ax.plot([], [], [], "o", color="#377eb8", markersize=5)
     (target_point,) = ax.plot([], [], [], "o", color="#ff7f0e", markersize=5)
 
@@ -325,9 +320,17 @@ def main() -> None:
         valstep=1,
     )
 
-    def _update_frame_lines(
-        lines: list, position: np.ndarray, rotation: np.ndarray, *, axis_length: float
-    ) -> None:
+    step_slider_ax = fig.add_axes([0.15, 0.03, 0.7, 0.03])
+    step_slider = Slider(
+        step_slider_ax,
+        "Action Step",
+        valmin=0,
+        valmax=args.target_steps - 1,
+        valinit=0,
+        valstep=1,
+    )
+
+    def _update_frame_lines(lines: list, position: np.ndarray, rotation: np.ndarray, *, axis_length: float) -> None:
         axes = rotation[:, 0:3]
         for axis_vec, line in zip(axes.T, lines):
             end = position + axis_length * axis_vec
@@ -339,15 +342,18 @@ def main() -> None:
             line.set_data([], [])
             line.set_3d_properties([])
 
-    def _update(index: int) -> None:
-        idx = int(index)
+    def _update(val: float) -> None:
+        idx = int(slider.val)
+        step_idx = int(step_slider.val)
+
         tcp_hist = tcp_positions[: idx + 1]
         tcp_line.set_data(tcp_hist[:, 0], tcp_hist[:, 1])
         tcp_line.set_3d_properties(tcp_hist[:, 2])
         tcp_point.set_data([tcp_positions[idx, 0]], [tcp_positions[idx, 1]])
         tcp_point.set_3d_properties([tcp_positions[idx, 2]])
 
-        target_hist = primary_targets[: idx + 1]
+        selected_targets = target_positions[:, step_idx, :]
+        target_hist = selected_targets[: idx + 1]
         target_mask = ~np.isnan(target_hist).any(axis=1)
         if np.any(target_mask):
             target_hist = target_hist[target_mask]
@@ -357,9 +363,9 @@ def main() -> None:
             target_line.set_data([], [])
             target_line.set_3d_properties([])
 
-        if not np.isnan(primary_targets[idx]).any():
-            target_point.set_data([primary_targets[idx, 0]], [primary_targets[idx, 1]])
-            target_point.set_3d_properties([primary_targets[idx, 2]])
+        if not np.isnan(selected_targets[idx]).any():
+            target_point.set_data([selected_targets[idx, 0]], [selected_targets[idx, 1]])
+            target_point.set_3d_properties([selected_targets[idx, 2]])
         else:
             target_point.set_data([], [])
             target_point.set_3d_properties([])
@@ -379,10 +385,9 @@ def main() -> None:
         else:
             _clear_frame_lines(tcp_frame_lines)
 
-        # Target frames (2-3 steps)
-        for step_idx, lines in enumerate(target_frame_lines):
-            pose = target_positions[idx, step_idx]
-            quat = target_quats[idx, step_idx]
+        for s_idx, lines in enumerate(target_frame_lines):
+            pose = target_positions[idx, s_idx]
+            quat = target_quats[idx, s_idx]
             if np.isnan(pose).any() or np.isnan(quat).any():
                 _clear_frame_lines(lines)
                 continue
@@ -391,17 +396,33 @@ def main() -> None:
                 _clear_frame_lines(lines)
                 continue
             _update_frame_lines(lines, pose, rot, axis_length=args.axis_length)
+            alpha = 0.95 if s_idx == step_idx else max(0.2, 0.5 - 0.1 * abs(s_idx - step_idx))
+            lw = 2.5 if s_idx == step_idx else 1.2
+            for line in lines:
+                line.set_alpha(alpha)
+                line.set_linewidth(lw)
 
-        status_text.set_text(
-            f"Frame {idx + 1}/{n_frames} | Targets: {args.target_steps}"
-        )
+        status_text.set_text(f"Frame {idx + 1}/{n_frames} | Action Step: {step_idx + 1}/{args.target_steps}")
         fig.canvas.draw_idle()
 
     slider.on_changed(_update)
+    step_slider.on_changed(_update)
     _update(0)
 
     logger.info("Loaded %d frames from %s", n_frames, args.records)
-    plt.show()
+
+    def _handle_sigint(signum: int, frame: object) -> None:
+        """Handle Ctrl+C by closing figure and exiting."""
+        plt.close(fig)
+        sys.exit(0)
+
+    signal.signal(signal.SIGINT, _handle_sigint)
+
+    try:
+        plt.show()
+    except KeyboardInterrupt:
+        plt.close(fig)
+        sys.exit(0)
 
 
 if __name__ == "__main__":

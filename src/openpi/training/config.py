@@ -448,6 +448,12 @@ class LeRobotFrankaDataConfigV2(DataConfigFactory):
     # 10 frames at 30Hz ≈ 333ms latency compensation.
     state_to_action_shift: int = 10
 
+    # If true, only convert translation (xyz) to delta actions relative to current state.
+    # Rotation (quaternion) and gripper remain absolute. For action format [x,y,z,qw,qx,qy,qz,gripper].
+    use_relative_translation: bool = False
+    # Number of translation dimensions (default 3 for xyz).
+    translation_dim: int = 3
+
     repack_transforms: tyro.conf.Suppress[_transforms.Group] = dataclasses.field(
         default=_transforms.Group(
             inputs=[
@@ -471,7 +477,6 @@ class LeRobotFrankaDataConfigV2(DataConfigFactory):
         # 2. FrankaInputs/Outputs: robot-specific transformations
         data_transforms = _transforms.Group(
             inputs=[
-                # Convert shifted state sequence to action targets
                 _transforms.ShiftedStateToAction(
                     state_key="observation/state",
                     action_key="actions",
@@ -482,7 +487,6 @@ class LeRobotFrankaDataConfigV2(DataConfigFactory):
                     state_key="observation/state",
                     frame_index=0,
                 ),
-                # Apply Franka-specific input transforms
                 franka_policy.FrankaInputs(
                     model_type=model_config.model_type,
                     state_dim=self.dataset_state_dim,
@@ -491,7 +495,14 @@ class LeRobotFrankaDataConfigV2(DataConfigFactory):
             outputs=[franka_policy.FrankaOutputs(action_dim=self.dataset_action_dim)],
         )
 
-        # Note: No DeltaActions transform - position control uses absolute positions
+        if self.use_relative_translation:
+            translation_delta_mask = _transforms.make_bool_mask(
+                self.translation_dim, -(self.dataset_action_dim - self.translation_dim)
+            )
+            data_transforms = data_transforms.push(
+                inputs=[_transforms.DeltaActions(translation_delta_mask)],
+                outputs=[_transforms.AbsoluteActions(translation_delta_mask)],
+            )
 
         model_transforms = ModelTransformFactory(default_prompt=self.default_prompt)(model_config)
 
@@ -955,6 +966,44 @@ _CONFIGS = [
         ema_decay=None,
     ),
     TrainConfig(
+        name="pi05_franka_cola_relative_lora",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_horizon=30,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+        ),
+        data=LeRobotFrankaDataConfigV2(
+            repo_id="2026_0126_pi05_franka_cola_lerobot_v2.1",
+            base_config=DataConfig(prompt_from_task=True),
+            dataset_action_dim=8,
+            dataset_state_dim=8,
+            default_prompt="open the can with the screwdriver",
+            use_relative_translation=True,
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("./data/checkpoints/pi05_base/params"),
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=500,
+            peak_lr=1.5e-5,
+            decay_steps=12_000,
+            decay_lr=1.0e-6,
+        ),
+        num_train_steps=6050,
+        batch_size=64,
+        num_workers=8,
+        log_interval=100,
+        save_interval=500,
+        keep_period=2000,
+        freeze_filter=pi0_config.Pi0Config(
+            pi05=True,
+            action_dim=8,
+            action_horizon=30,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+        ).get_freeze_filter(),
+        ema_decay=None,
+    ),
+    TrainConfig(
         # Continue training from pi05_franka_position_control_lora/6000 checkpoint
         # with new cola dataset, using shifted state as action targets.
         name="pi05_franka_cola_lora_finetune",
@@ -965,7 +1014,7 @@ _CONFIGS = [
             action_expert_variant="gemma_300m_lora",
         ),
         data=LeRobotFrankaDataConfigV2(
-            repo_id="2026_0126_pi05_franka_cola_lerobot_v2.0",
+            repo_id="2026_0126_pi05_franka_cola_lerobot_v2.1",
             base_config=DataConfig(prompt_from_task=True),
             dataset_action_dim=8,
             dataset_state_dim=7,

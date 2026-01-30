@@ -20,6 +20,7 @@ import numpy as np
 import tyro
 import zarr
 
+_DEFAULT_RECORDS = "/home/mpi/workspace/yhx/openpi/demo_records/"
 _DEFAULT_RECORDS = "/home/mpi/workspace/yhx/openpi/eval_records/pi05_franka_position_control_lora/20260126"
 
 
@@ -136,7 +137,9 @@ def main(args: Args) -> None:
     records_path = Path(args.records)
     pkl_files = _collect_pkl_files(records_path)
 
-    output_dir = Path(args.output_dir) if args.output_dir else records_path if records_path.is_dir() else records_path.parent
+    output_dir = (
+        Path(args.output_dir) if args.output_dir else records_path if records_path.is_dir() else records_path.parent
+    )
     output_dir.mkdir(parents=True, exist_ok=True)
     zarr_path = output_dir / "replay_buffer.zarr"
 
@@ -173,20 +176,67 @@ def main(args: Args) -> None:
         n_frames = len(ep_data["action"])
 
         if not initialized:
-            img_shape = ep_data["l500_camera_img"].shape[1:]
-            zarr_data.create_dataset("timestamp", data=ep_data["timestamp"], chunks=(10000,), dtype="float32", compressor=compressor)
-            zarr_data.create_dataset("l500_camera_img", data=ep_data["l500_camera_img"], chunks=(100,) + img_shape, dtype="uint8", compressor=compressor)
-            zarr_data.create_dataset("d400_camera_img", data=ep_data["d400_camera_img"], chunks=(100,) + img_shape, dtype="uint8", compressor=compressor)
-            zarr_data.create_dataset("robot_tcp_pose", data=ep_data["robot_tcp_pose"], chunks=(10000, 8), dtype="float32", compressor=compressor)
-            zarr_data.create_dataset("robot_tcp_wrench", data=ep_data["robot_tcp_wrench"], chunks=(10000, 6), dtype="float32", compressor=compressor)
-            zarr_data.create_dataset("action", data=ep_data["action"], chunks=(10000, 8), dtype="float32", compressor=compressor)
-            zarr_data.create_dataset("is_human_teaching", data=ep_data["is_human_teaching"], chunks=(10000,), dtype="uint8", compressor=compressor)
+            l500_shape = ep_data["l500_camera_img"].shape[1:]
+            d400_shape = ep_data["d400_camera_img"].shape[1:]
+            zarr_data.create_dataset(
+                "timestamp", data=ep_data["timestamp"], chunks=(10000,), dtype="float32", compressor=compressor
+            )
+            zarr_data.create_dataset(
+                "l500_camera_img",
+                data=ep_data["l500_camera_img"],
+                chunks=(100,) + l500_shape,
+                dtype="uint8",
+                compressor=compressor,
+            )
+            zarr_data.create_dataset(
+                "d400_camera_img",
+                data=ep_data["d400_camera_img"],
+                chunks=(100,) + d400_shape,
+                dtype="uint8",
+                compressor=compressor,
+            )
+            zarr_data.create_dataset(
+                "robot_tcp_pose",
+                data=ep_data["robot_tcp_pose"],
+                chunks=(10000, 8),
+                dtype="float32",
+                compressor=compressor,
+            )
+            zarr_data.create_dataset(
+                "robot_tcp_wrench",
+                data=ep_data["robot_tcp_wrench"],
+                chunks=(10000, 6),
+                dtype="float32",
+                compressor=compressor,
+            )
+            zarr_data.create_dataset(
+                "action", data=ep_data["action"], chunks=(10000, 8), dtype="float32", compressor=compressor
+            )
+            zarr_data.create_dataset(
+                "is_human_teaching",
+                data=ep_data["is_human_teaching"],
+                chunks=(10000,),
+                dtype="uint8",
+                compressor=compressor,
+            )
             if "xense1_camera_img" in ep_data:
                 xense1_shape = ep_data["xense1_camera_img"].shape[1:]
-                zarr_data.create_dataset("xense1_camera_img", data=ep_data["xense1_camera_img"], chunks=(100,) + xense1_shape, dtype="uint8", compressor=compressor)
+                zarr_data.create_dataset(
+                    "xense1_camera_img",
+                    data=ep_data["xense1_camera_img"],
+                    chunks=(100,) + xense1_shape,
+                    dtype="uint8",
+                    compressor=compressor,
+                )
             if "xense1_marker3d" in ep_data:
                 m3d_shape = ep_data["xense1_marker3d"].shape[1:]
-                zarr_data.create_dataset("xense1_marker3d", data=ep_data["xense1_marker3d"], chunks=(100,) + m3d_shape, dtype="float32", compressor=compressor)
+                zarr_data.create_dataset(
+                    "xense1_marker3d",
+                    data=ep_data["xense1_marker3d"],
+                    chunks=(100,) + m3d_shape,
+                    dtype="float32",
+                    compressor=compressor,
+                )
             initialized = True
         else:
             zarr_data["timestamp"].append(ep_data["timestamp"])
@@ -207,7 +257,13 @@ def main(args: Args) -> None:
         gc.collect()
 
     if episode_ends:
-        zarr_meta.create_dataset("episode_ends", data=np.array(episode_ends, dtype=np.int64), chunks=(10000,), dtype="int64", compressor=compressor)
+        zarr_meta.create_dataset(
+            "episode_ends",
+            data=np.array(episode_ends, dtype=np.int64),
+            chunks=(10000,),
+            dtype="int64",
+            compressor=compressor,
+        )
 
     print(f"\nDone. Episodes: {len(episode_ends)}, Frames: {total_frames}")
     print(f"Zarr saved to: {zarr_path}")

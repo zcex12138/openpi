@@ -53,11 +53,13 @@ class FrankaEnvironment(_environment.Environment):
         self._render_width = render_width
         self._max_episode_time = max_episode_time
 
-        self._episode_start_time: float = 0.0
+        self._episode_start_time: float | None = None
         self._step_count: int = 0
         self._episode_complete: bool = False
         self._last_frame_seq: int | None = None
         self._stale_frame_count: int = 0
+        self._last_control_step_time_s: float | None = None
+        self._control_hz_ema: float | None = None
         self._teaching_mode_active: bool = False
         self._keyboard_enabled: bool = sys.stdin.isatty()
         if not self._keyboard_enabled:
@@ -68,9 +70,12 @@ class FrankaEnvironment(_environment.Environment):
         """Reset environment for a new episode."""
         logger.info("Resetting environment...")
         self._real_env.reset()
-        self._episode_start_time = time.time()
+        # Defer start time to first apply_action call
+        self._episode_start_time = None
         self._step_count = 0
         self._episode_complete = False
+        self._last_control_step_time_s = None
+        self._control_hz_ema = None
         self._teaching_mode_active = False
         logger.info("Environment reset complete")
 
@@ -80,6 +85,8 @@ class FrankaEnvironment(_environment.Environment):
         if self._episode_complete:
             return True
         if self._teaching_mode_active:
+            return False
+        if self._episode_start_time is None:
             return False
         elapsed = time.time() - self._episode_start_time
         if elapsed > self._max_episode_time:
@@ -105,6 +112,7 @@ class FrankaEnvironment(_environment.Environment):
         if not self._keyboard_enabled or self._teaching_mode_active:
             return
         from examples.franka.keyboard_utils import check_key_pressed
+
         key = check_key_pressed()
         if key == " ":
             self.enable_teaching_mode()
@@ -203,8 +211,51 @@ class FrankaEnvironment(_environment.Environment):
         if actions.ndim == 2:
             actions = actions[0]
 
+        if self._episode_start_time is None:
+            self._episode_start_time = time.time()
+
         elapsed = time.time() - self._episode_start_time
-        print(f"[openpi] step={self._step_count} t={elapsed:.3f}s", flush=True)
+
+        now_s = time.perf_counter()
+        if self._last_control_step_time_s is not None:
+            dt_s = now_s - self._last_control_step_time_s
+            if dt_s > 0:
+                inst_hz = 1.0 / dt_s
+                ema_alpha = 0.2
+                if self._control_hz_ema is None:
+                    self._control_hz_ema = inst_hz
+                else:
+                    self._control_hz_ema = (ema_alpha * inst_hz) + ((1.0 - ema_alpha) * self._control_hz_ema)
+        self._last_control_step_time_s = now_s
+
+        hz_str = "--" if self._control_hz_ema is None else f"{self._control_hz_ema:.1f}"
+
+        chunk_meta = action.get("__chunk_meta")
+        if chunk_meta:
+            chunk_idx = chunk_meta.get("chunk_idx", "?")
+            chunk_size = chunk_meta.get("chunk_size", "?")
+            new_chunk = chunk_meta.get("new_chunk", False)
+            infer_started = chunk_meta.get("inference_started", False)
+            flags = []
+            if new_chunk:
+                flags.append("NEW")
+            if infer_started:
+                flags.append("INFER")
+            flag_str = f" [{','.join(flags)}]" if flags else ""
+
+            infer_str = ""
+            if "infer_ms" in chunk_meta:
+                infer_ms = chunk_meta["infer_ms"]
+                stats = chunk_meta.get("infer_stats", {})
+                mean_ms = stats.get("mean_ms", 0)
+                infer_str = f" infer={infer_ms:.0f}ms(avg={mean_ms:.0f}ms)"
+
+            print(
+                f"[openpi] step={self._step_count} t={elapsed:.3f}s hz={hz_str} chunk={chunk_idx}/{chunk_size}{flag_str}{infer_str}",
+                flush=True,
+            )
+        else:
+            print(f"[openpi] step={self._step_count} t={elapsed:.3f}s hz={hz_str}", flush=True)
 
         executed_action = self._real_env.execute_action(actions)
         action["executed_action"] = executed_action
@@ -218,4 +269,6 @@ class FrankaEnvironment(_environment.Environment):
     @property
     def elapsed_time(self) -> float:
         """Time elapsed since episode start."""
+        if self._episode_start_time is None:
+            return 0.0
         return time.time() - self._episode_start_time

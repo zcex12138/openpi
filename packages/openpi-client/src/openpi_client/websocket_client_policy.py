@@ -2,11 +2,15 @@ import logging
 import time
 from typing import Dict, Optional, Tuple
 
+import numpy as np
 from typing_extensions import override
 import websockets.sync.client
 
 from openpi_client import base_policy as _base_policy
 from openpi_client import msgpack_numpy
+
+# Reserved key for transmitting action_prefix through the websocket protocol.
+_ACTION_PREFIX_KEY = "__rtc_action_prefix"
 
 
 class WebsocketClientPolicy(_base_policy.BasePolicy):
@@ -43,15 +47,36 @@ class WebsocketClientPolicy(_base_policy.BasePolicy):
                 logging.info("Still waiting for server...")
                 time.sleep(5)
 
-    @override
-    def infer(self, obs: Dict) -> Dict:  # noqa: UP006
-        data = self._packer.pack(obs)
+    def _send_and_recv(self, payload: dict) -> Dict:
+        data = self._packer.pack(payload)
         self._ws.send(data)
         response = self._ws.recv()
         if isinstance(response, str):
-            # we're expecting bytes; if the server sends a string, it's an error.
             raise RuntimeError(f"Error in inference server:\n{response}")
         return msgpack_numpy.unpackb(response)
+
+    @override
+    def infer(self, obs: Dict) -> Dict:  # noqa: UP006
+        return self._send_and_recv(obs)
+
+    def infer_realtime(
+        self,
+        obs: Dict,
+        *,
+        action_prefix: Optional[np.ndarray] = None,
+        noise: Optional[np.ndarray] = None,
+    ) -> Dict:
+        """Inference with prefix conditioning for real-time chunking.
+
+        Embeds action_prefix into the observation dict under a reserved key
+        so the server can extract it and call policy.infer_realtime().
+        """
+        if action_prefix is None:
+            return self.infer(obs)
+
+        payload = dict(obs)
+        payload[_ACTION_PREFIX_KEY] = np.asarray(action_prefix)
+        return self._send_and_recv(payload)
 
     @override
     def reset(self) -> None:

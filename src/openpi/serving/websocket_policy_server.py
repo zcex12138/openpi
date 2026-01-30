@@ -11,6 +11,9 @@ import websockets.frames
 
 logger = logging.getLogger(__name__)
 
+# Reserved key for real-time chunking action prefix (must match client).
+_ACTION_PREFIX_KEY = "__rtc_action_prefix"
+
 
 class WebsocketPolicyServer:
     """Serves a policy using the websocket protocol. See websocket_client_policy.py for a client implementation.
@@ -58,8 +61,13 @@ class WebsocketPolicyServer:
                     start_time = time.monotonic()
                     obs = msgpack_numpy.unpackb(await websocket.recv())
 
+                    action_prefix = obs.pop(_ACTION_PREFIX_KEY, None)
+
                     infer_time = time.monotonic()
-                    action = self._policy.infer(obs)
+                    if action_prefix is not None and hasattr(self._policy, "infer_realtime"):
+                        action = self._policy.infer_realtime(obs, action_prefix=action_prefix)
+                    else:
+                        action = self._policy.infer(obs)
                     infer_time = time.monotonic() - infer_time
 
                     action["server_timing"] = {

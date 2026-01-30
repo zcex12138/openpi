@@ -40,6 +40,7 @@ class RealEnvConfig:
 
     All parameters can be loaded from real_env_config.yaml.
     """
+
     # Robot connection
     robot_ip: str = "172.16.0.2"
 
@@ -96,9 +97,12 @@ class RealEnvConfig:
     teaching_rotational_stiffness: list[float] = field(default_factory=lambda: [0.0, 0.0, 0.0])
     teaching_load_mass: float = 0.3
     teaching_load_com: list[float] = field(default_factory=lambda: [0.0, 0.0, 0.0])
-    teaching_load_inertia: list[float] = field(
-        default_factory=lambda: [0.001, 0, 0, 0, 0.001, 0, 0, 0, 0.001]
-    )
+    teaching_load_inertia: list[float] = field(default_factory=lambda: [0.001, 0, 0, 0, 0.001, 0, 0, 0, 0.001])
+
+    # Real-Time Chunking (RTC)
+    rtc_enabled: bool = False
+    rtc_inference_delay: int = 3
+    rtc_execute_horizon: int = 5
 
     @property
     def workspace_bounds(self) -> tuple[np.ndarray, np.ndarray]:
@@ -159,7 +163,12 @@ class RealEnvConfig:
             teaching_load_mass=get_nested(cfg, ["teaching", "load_mass"], 0.3),
             teaching_load_com=get_nested(cfg, ["teaching", "load_com"], _default_load_com),
             teaching_load_inertia=get_nested(cfg, ["teaching", "load_inertia"], _default_load_inertia),
+            # Real-Time Chunking (RTC)
+            rtc_enabled=get_nested(cfg, ["rtc", "enabled"], False),
+            rtc_inference_delay=get_nested(cfg, ["rtc", "inference_delay"], 3),
+            rtc_execute_horizon=get_nested(cfg, ["rtc", "execute_horizon"], 5),
         )
+
 
 _CONTROL_MODES = ("impedance", "cartesian")
 
@@ -216,27 +225,29 @@ class FrankaRealEnv:
         self._max_pos_speed = max_pos_speed if max_pos_speed is not None else self._config.max_pos_speed
         self._dt = 1.0 / self._control_fps
         self._impedance_translational_stiffness = (
-            impedance_translational_stiffness if impedance_translational_stiffness is not None
+            impedance_translational_stiffness
+            if impedance_translational_stiffness is not None
             else self._config.impedance_translational_stiffness
         )
         self._impedance_rotational_stiffness = (
-            impedance_rotational_stiffness if impedance_rotational_stiffness is not None
+            impedance_rotational_stiffness
+            if impedance_rotational_stiffness is not None
             else self._config.impedance_rotational_stiffness
         )
         self._gripper_command_interval_s = (
-            gripper_command_interval_s if gripper_command_interval_s is not None
+            gripper_command_interval_s
+            if gripper_command_interval_s is not None
             else self._config.gripper_command_interval
         )
         self._auto_reset_on_disconnect = (
-            auto_reset_on_disconnect if auto_reset_on_disconnect is not None
-            else self._config.auto_reset_on_disconnect
+            auto_reset_on_disconnect if auto_reset_on_disconnect is not None else self._config.auto_reset_on_disconnect
         )
         self._action_smoothing_alpha = (
-            action_smoothing_alpha if action_smoothing_alpha is not None
-            else self._config.action_smoothing_alpha
+            action_smoothing_alpha if action_smoothing_alpha is not None else self._config.action_smoothing_alpha
         )
         self._cartesian_velocity_factor = (
-            cartesian_velocity_factor if cartesian_velocity_factor is not None
+            cartesian_velocity_factor
+            if cartesian_velocity_factor is not None
             else self._config.cartesian_velocity_factor
         )
 
@@ -257,12 +268,11 @@ class FrankaRealEnv:
         self._last_target_action: np.ndarray | None = None
 
         _gripper_interp_duration = (
-            gripper_interpolation_duration if gripper_interpolation_duration is not None
+            gripper_interpolation_duration
+            if gripper_interpolation_duration is not None
             else self._config.gripper_interpolation_duration
         )
-        self._gripper_interpolator = GripperStateInterpolator(
-            interpolation_duration=_gripper_interp_duration
-        )
+        self._gripper_interpolator = GripperStateInterpolator(interpolation_duration=_gripper_interp_duration)
         self._teaching_mode: bool = False
 
     def connect(self) -> None:
@@ -686,7 +696,11 @@ class FrankaRealEnv:
 
     def _ensure_control_motion(self) -> None:
         if self._control_mode == "impedance":
-            if self._impedance_motion is None or self._impedance_thread is None or not self._impedance_thread.is_alive():
+            if (
+                self._impedance_motion is None
+                or self._impedance_thread is None
+                or not self._impedance_thread.is_alive()
+            ):
                 self._start_impedance_motion()
         elif self._waypoint_motion is None or self._waypoint_thread is None or not self._waypoint_thread.is_alive():
             self._start_waypoint_motion()
@@ -749,7 +763,8 @@ class FrankaRealEnv:
         self._impedance_motion = ImpedanceMotion(trans_stiffness, rot_stiffness)
         logger.info(
             "Teaching stiffness: translational=%s, rotational=%s",
-            trans_stiffness, rot_stiffness,
+            trans_stiffness,
+            rot_stiffness,
         )
         current_affine = self._get_current_affine(force_robot_state=True)
         self._impedance_motion.target = current_affine

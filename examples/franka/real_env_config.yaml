@@ -18,11 +18,11 @@ workspace_bounds:
 
 # Motion limits
 motion:
-  max_pos_speed: 0.3  # Maximum TCP speed (m/s)
+  max_pos_speed: 0.8  # Maximum TCP speed (m/s)
 
 # Impedance control parameters (only used when control.mode = "impedance")
 impedance:
-  translational_stiffness: 1900.0  # Translational stiffness (N/m)
+  translational_stiffness: 2500.0  # Translational stiffness (N/m)
   rotational_stiffness: 100.0       # Rotational stiffness (Nm/rad)
 
 # Cartesian control parameters (only used when control.mode = "cartesian")
@@ -31,7 +31,7 @@ cartesian:
 
 # Action smoothing
 smoothing:
-  alpha: 0.1  # EMA filter alpha (0.0=no smoothing, 0.5=moderate, 0.9=heavy)
+  alpha: 0.0  # EMA filter alpha (0.0=no smoothing, 0.5=moderate, 0.9=heavy)
 
 # Gripper configuration
 gripper:
@@ -62,7 +62,7 @@ ee_transform: [
 
 # Evaluation parameters
 evaluation:
-  max_episode_time: 30.0  # Maximum episode duration (seconds)
+  max_episode_time: 120.0  # Maximum episode duration (seconds)
   num_episodes: 10        # Default number of evaluation episodes
   default_prompt: "open the can with the screwdriver"  # Default task prompt
 
@@ -70,13 +70,13 @@ evaluation:
 teaching:
   # Per-axis stiffness: [X, Y, Z] - set individual axis to 0 for full compliance
   translational_stiffness: [50.0, 50.0, 50.0]  # Translational stiffness per axis (N/m)
-  rotational_stiffness: [20.0, 0.0, 20.0]           # Rotational stiffness per axis (Nm/rad)
+  rotational_stiffness: [0.0, 0.0, 0.0]           # Rotational stiffness per axis (Nm/rad)
   load_mass: 0.35                   # End-effector load mass [kg]
   load_com: [0.0, 0.0, 0.03]         # Load center of mass [m]
   load_inertia: [1.0, 0, 0, 0, 1.0, 0, 0, 0, 1.0]  # Load inertia matrix [kg·m²]
 
 # Real-Time Chunking (RTC) parameters
 rtc:
-  enabled: false          # Enable RTC mode by default
-  inference_delay: 5      # Actions executed during inference
-  execute_horizon: 10      # Total actions per iteration
+  enabled: true          # Enable RTC mode by default
+  inference_delay: 5     # Actions executed during inference
+  execute_horizon: 30      # Total actions per iteration

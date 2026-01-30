@@ -98,10 +98,10 @@ class Args:
     record_fps: float = 30.0
     record_queue_size: int = 256
 
-    # Real-Time Chunking (RTC)
-    rtc: bool = False  # Enable real-time chunking mode
-    rtc_inference_delay: int = 3  # Actions executed during inference
-    rtc_execute_horizon: int = 5  # Total actions per iteration
+    # Real-Time Chunking (RTC) - command line overrides config file
+    rtc: bool = False  # Enable RTC (overrides config if True)
+    rtc_inference_delay: int | None = None  # None = use config file value
+    rtc_execute_horizon: int | None = None  # None = use config file value
 
     # Visualization (optional)
     visualize: bool = False  # Enable camera visualization during evaluation
@@ -190,13 +190,25 @@ def main(args: Args) -> None:
         action_horizon = args.open_loop_horizon or cfg.model.action_horizon
 
     # Create action chunk broker (standard or RTC mode)
-    if args.rtc:
-        logger.info("Using Real-Time Chunking mode (inference_delay=%d, execute_horizon=%d)",
-                    args.rtc_inference_delay, args.rtc_execute_horizon)
+    # Resolve RTC parameters: command line True overrides config, else use config
+    rtc_enabled = args.rtc or _default_config.rtc_enabled
+    rtc_inference_delay = (
+        args.rtc_inference_delay if args.rtc_inference_delay is not None else _default_config.rtc_inference_delay
+    )
+    rtc_execute_horizon = (
+        args.rtc_execute_horizon if args.rtc_execute_horizon is not None else _default_config.rtc_execute_horizon
+    )
+
+    if rtc_enabled:
+        logger.info(
+            "Using Real-Time Chunking mode (inference_delay=%d, execute_horizon=%d)",
+            rtc_inference_delay,
+            rtc_execute_horizon,
+        )
         rtc_config = RTCConfig(
             action_horizon=action_horizon,
-            inference_delay=args.rtc_inference_delay,
-            execute_horizon=args.rtc_execute_horizon,
+            inference_delay=rtc_inference_delay,
+            execute_horizon=rtc_execute_horizon,
             control_hz=args.control_fps if args.control_fps else _default_config.control_fps,
         )
         chunked_policy = RealTimeChunkBroker(policy=policy, config=rtc_config)

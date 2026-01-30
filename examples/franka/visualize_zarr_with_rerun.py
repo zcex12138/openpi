@@ -997,12 +997,13 @@ Example:
         "--zarr_path",
         type=str,
         default="eval_records/pi05_franka_position_control_lora/20260126/replay_buffer.zarr",
+        # default="demo_records/replay_buffer.zarr",
         help="Path to zarr dataset file",
     )
 
     parser.add_argument("--fps", type=float, default=30.0, help="Playback frame rate")
 
-    parser.add_argument("--episode", "-e", type=int, default=14, help="Starting episode ID (0-indexed)")
+    parser.add_argument("--episode", "-e", type=int, default=0, help="Starting episode ID (0-indexed)")
 
     args = parser.parse_args()
 

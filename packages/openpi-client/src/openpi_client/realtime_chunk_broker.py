@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import threading
+import time
 from collections import deque
 from dataclasses import dataclass
 from typing import Callable, Optional
@@ -21,6 +22,34 @@ class RTCConfig:
     inference_delay: int = 3  # Actions executed during inference
     execute_horizon: int = 5  # Total actions per iteration
     control_hz: float = 10.0  # Control frequency
+
+
+@dataclass
+class InferenceStats:
+    """Statistics for inference timing."""
+
+    last_infer_ms: float = 0.0
+    mean_infer_ms: float = 0.0
+    max_infer_ms: float = 0.0
+    min_infer_ms: float = float("inf")
+    total_infer_count: int = 0
+    _sum_ms: float = 0.0
+
+    def update(self, infer_ms: float) -> None:
+        self.last_infer_ms = infer_ms
+        self.total_infer_count += 1
+        self._sum_ms += infer_ms
+        self.mean_infer_ms = self._sum_ms / self.total_infer_count
+        self.max_infer_ms = max(self.max_infer_ms, infer_ms)
+        self.min_infer_ms = min(self.min_infer_ms, infer_ms)
+
+    def reset(self) -> None:
+        self.last_infer_ms = 0.0
+        self.mean_infer_ms = 0.0
+        self.max_infer_ms = 0.0
+        self.min_infer_ms = float("inf")
+        self.total_infer_count = 0
+        self._sum_ms = 0.0
 
 
 class RealTimeChunkBroker(_base_policy.BasePolicy):
@@ -55,6 +84,9 @@ class RealTimeChunkBroker(_base_policy.BasePolicy):
         self._current_chunk: np.ndarray | None = None
         self._chunk_index: int = 0
         self._last_action: np.ndarray | None = None
+        self._infer_count: int = 0
+        self._last_new_chunk: bool = False
+        self._inference_started_this_step: bool = False
 
         # Threading
         self._lock = threading.Lock()
@@ -63,9 +95,12 @@ class RealTimeChunkBroker(_base_policy.BasePolicy):
         self._pending_obs: dict | None = None
         self._new_chunk_ready = threading.Event()
 
-    def _default_infer_fn(
-        self, obs: dict, action_prefix: np.ndarray | None = None
-    ) -> dict:
+        # Inference timing
+        self._infer_stats = InferenceStats()
+        self._last_infer_ms: float = 0.0
+        self._trigger_chunk_index: int = 0  # chunk_index when inference was triggered
+
+    def _default_infer_fn(self, obs: dict, action_prefix: np.ndarray | None = None) -> dict:
         """Default inference function."""
         if hasattr(self._policy, "infer_realtime"):
             return self._policy.infer_realtime(obs, action_prefix=action_prefix)
@@ -78,29 +113,62 @@ class RealTimeChunkBroker(_base_policy.BasePolicy):
         This is the synchronous interface matching ActionChunkBroker.
         For async operation, use start_async/get_action pattern.
         """
+        self._inference_started_this_step = False
+        self._last_new_chunk = False
+
         with self._lock:
-            # Check if we have actions available
-            if self._current_chunk is not None and self._chunk_index < len(self._current_chunk):
+            # Check if we have actions available (limited by execute_horizon)
+            effective_len = self._get_effective_chunk_len()
+            if self._current_chunk is not None and self._chunk_index < effective_len:
+                chunk_idx = self._chunk_index
                 action = self._current_chunk[self._chunk_index]
                 self._chunk_index += 1
                 self._last_action = action.copy()
 
-                # Trigger new inference when approaching end
-                remaining = len(self._current_chunk) - self._chunk_index
+                # Trigger new inference when remaining <= inference_delay
+                remaining = effective_len - self._chunk_index
                 if remaining <= self._config.inference_delay:
                     self._trigger_inference(obs)
 
-                return {"actions": action}
+                return {
+                    "actions": action,
+                    "__chunk_meta": {
+                        "chunk_idx": chunk_idx,
+                        "chunk_size": effective_len,
+                        "new_chunk": False,
+                        "infer_count": self._infer_count,
+                        "inference_started": self._inference_started_this_step,
+                        "infer_ms": self._last_infer_ms,
+                        "infer_stats": {
+                            "mean_ms": self._infer_stats.mean_infer_ms,
+                            "max_ms": self._infer_stats.max_infer_ms,
+                            "min_ms": self._infer_stats.min_infer_ms
+                            if self._infer_stats.min_infer_ms != float("inf")
+                            else 0.0,
+                        },
+                    },
+                }
 
         # No actions available, must wait for inference
         return self._blocking_infer(obs)
 
+    def _get_effective_chunk_len(self) -> int:
+        """Get effective chunk length, limited by execute_horizon."""
+        if self._current_chunk is None:
+            return 0
+        return min(len(self._current_chunk), self._config.execute_horizon)
+
     def _blocking_infer(self, obs: dict) -> dict:
         """Perform blocking inference when no cached actions available."""
-        # Get prefix from recently executed actions
         prefix = self._get_executed_prefix()
 
+        self._infer_count += 1
+        start_time = time.perf_counter()
         result = self._infer_fn(obs, action_prefix=prefix)
+        infer_ms = (time.perf_counter() - start_time) * 1000
+        self._infer_stats.update(infer_ms)
+        self._last_infer_ms = infer_ms
+
         actions = result.get("actions", result.get("action"))
 
         if actions is None:
@@ -109,13 +177,31 @@ class RealTimeChunkBroker(_base_policy.BasePolicy):
         with self._lock:
             self._current_chunk = np.asarray(actions)
             self._chunk_index = 0
+            effective_len = self._get_effective_chunk_len()
 
             # Return first action
             action = self._current_chunk[0]
             self._chunk_index = 1
             self._last_action = action.copy()
+            self._last_new_chunk = True
 
-        return {"actions": action, **{k: v for k, v in result.items() if k != "actions"}}
+        return {
+            "actions": action,
+            "__chunk_meta": {
+                "chunk_idx": 0,
+                "chunk_size": effective_len,
+                "new_chunk": True,
+                "infer_count": self._infer_count,
+                "inference_started": True,
+                "infer_ms": infer_ms,
+                "infer_stats": {
+                    "mean_ms": self._infer_stats.mean_infer_ms,
+                    "max_ms": self._infer_stats.max_infer_ms,
+                    "min_ms": self._infer_stats.min_infer_ms if self._infer_stats.min_infer_ms != float("inf") else 0.0,
+                },
+            },
+            **{k: v for k, v in result.items() if k != "actions"},
+        }
 
     def _get_executed_prefix(self) -> np.ndarray | None:
         """Get recently executed actions as prefix for conditioning."""
@@ -134,6 +220,8 @@ class RealTimeChunkBroker(_base_policy.BasePolicy):
             return  # Already running
 
         self._pending_obs = obs
+        self._trigger_chunk_index = self._chunk_index
+        self._inference_started_this_step = True
         self._inference_thread = threading.Thread(target=self._inference_worker, daemon=True)
         self._inference_thread.start()
 
@@ -144,7 +232,12 @@ class RealTimeChunkBroker(_base_policy.BasePolicy):
             return
 
         prefix = self._get_executed_prefix()
+        start_time = time.perf_counter()
         result = self._infer_fn(obs, action_prefix=prefix)
+        infer_ms = (time.perf_counter() - start_time) * 1000
+        self._infer_stats.update(infer_ms)
+        self._last_infer_ms = infer_ms
+
         actions = result.get("actions", result.get("action"))
 
         if actions is not None:
@@ -152,17 +245,19 @@ class RealTimeChunkBroker(_base_policy.BasePolicy):
             self._new_chunk_ready.set()
 
     def _merge_chunk(self, new_chunk: np.ndarray) -> None:
-        """Merge new chunk with existing queue."""
+        """Merge new chunk with existing queue, respecting execute_horizon."""
         with self._lock:
-            # Discard executed portion, keep remainder + new chunk suffix
             if self._current_chunk is not None:
-                remaining = self._current_chunk[self._chunk_index :]
-                # Use new chunk from inference_delay onwards
-                new_suffix = new_chunk[self._config.inference_delay :]
-                self._current_chunk = np.concatenate([remaining, new_suffix], axis=0)
+                effective_len = self._get_effective_chunk_len()
+                remaining = self._current_chunk[self._chunk_index : effective_len]
+                frames_elapsed = self._chunk_index - self._trigger_chunk_index
+                skip_count = max(0, min(frames_elapsed, len(new_chunk) - 1))
+                new_suffix = new_chunk[skip_count:]
+                merged = np.concatenate([remaining, new_suffix], axis=0)
+                self._current_chunk = merged[: self._config.execute_horizon]
                 self._chunk_index = 0
             else:
-                self._current_chunk = new_chunk
+                self._current_chunk = new_chunk[: self._config.execute_horizon]
                 self._chunk_index = 0
 
     def get_action(self, obs: dict, *, block: bool = True, timeout: float | None = None) -> np.ndarray | None:
@@ -177,13 +272,14 @@ class RealTimeChunkBroker(_base_policy.BasePolicy):
             Action array, or None if non-blocking and unavailable.
         """
         with self._lock:
-            if self._current_chunk is not None and self._chunk_index < len(self._current_chunk):
+            effective_len = self._get_effective_chunk_len()
+            if self._current_chunk is not None and self._chunk_index < effective_len:
                 action = self._current_chunk[self._chunk_index]
                 self._chunk_index += 1
                 self._last_action = action.copy()
 
                 # Trigger async inference when nearing end
-                remaining = len(self._current_chunk) - self._chunk_index
+                remaining = effective_len - self._chunk_index
                 if remaining <= self._config.inference_delay:
                     self._trigger_inference(obs)
 
@@ -207,6 +303,12 @@ class RealTimeChunkBroker(_base_policy.BasePolicy):
             self._last_action = None
             self._pending_obs = None
             self._new_chunk_ready.clear()
+            self._infer_count = 0
+            self._last_new_chunk = False
+            self._inference_started_this_step = False
+            self._infer_stats.reset()
+            self._last_infer_ms = 0.0
+            self._trigger_chunk_index = 0
 
         if hasattr(self._policy, "reset"):
             self._policy.reset()
@@ -215,12 +317,16 @@ class RealTimeChunkBroker(_base_policy.BasePolicy):
     def has_pending_actions(self) -> bool:
         """Check if there are actions available without inference."""
         with self._lock:
-            return self._current_chunk is not None and self._chunk_index < len(self._current_chunk)
+            effective_len = self._get_effective_chunk_len()
+            return self._current_chunk is not None and self._chunk_index < effective_len
 
     @property
     def remaining_actions(self) -> int:
         """Number of actions remaining in current chunk."""
         with self._lock:
-            if self._current_chunk is None:
-                return 0
-            return len(self._current_chunk) - self._chunk_index
+            effective_len = self._get_effective_chunk_len()
+            return max(0, effective_len - self._chunk_index)
+
+    @property
+    def infer_stats(self) -> InferenceStats:
+        return self._infer_stats

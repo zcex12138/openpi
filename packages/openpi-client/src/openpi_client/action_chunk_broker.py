@@ -20,14 +20,17 @@ class ActionChunkBroker(_base_policy.BasePolicy):
         self._policy = policy
         self._action_horizon = action_horizon
         self._cur_step: int = 0
+        self._infer_count: int = 0
 
         self._last_results: Dict[str, np.ndarray] | None = None
 
     @override
     def infer(self, obs: Dict) -> Dict:  # noqa: UP006
-        if self._last_results is None:
+        new_chunk = self._last_results is None
+        if new_chunk:
             self._last_results = self._policy.infer(obs)
             self._cur_step = 0
+            self._infer_count += 1
 
         def slicer(x):
             if isinstance(x, np.ndarray):
@@ -36,6 +39,12 @@ class ActionChunkBroker(_base_policy.BasePolicy):
                 return x
 
         results = tree.map_structure(slicer, self._last_results)
+        results["__chunk_meta"] = {
+            "chunk_idx": self._cur_step,
+            "chunk_size": self._action_horizon,
+            "new_chunk": new_chunk,
+            "infer_count": self._infer_count,
+        }
         self._cur_step += 1
 
         if self._cur_step >= self._action_horizon:
@@ -48,3 +57,4 @@ class ActionChunkBroker(_base_policy.BasePolicy):
         self._policy.reset()
         self._last_results = None
         self._cur_step = 0
+        self._infer_count = 0

@@ -18,12 +18,13 @@ from lerobot.common.datasets.lerobot_dataset import HF_LEROBOT_HOME, LeRobotData
 
 def main(
     zarr_path: str = "/home/mpi/workspace/yhx/openpi/eval_records/pi05_franka_position_control_lora/20260126/replay_buffer.zarr",
-    repo_id: str = "2026_0126_pi05_franka_cola_lerobot_v2.0",
+    repo_id: str = "2026_0126_pi05_franka_cola_lerobot_v2.1",
     task: str = "open the can with the screwdriver",
     fps: int = 30,
     image_writer_processes: int = 10,
     image_writer_threads: int = 5,
     push_to_hub: bool = False,
+    drop_frames_after_human_teaching: int = 30,
 ):
     # 清理已存在的数据集
     output_path = HF_LEROBOT_HOME / repo_id
@@ -36,6 +37,7 @@ def main(
     # 获取数据 (嵌套结构: data/ 和 meta/)
     episode_ends = z["meta/episode_ends"][:]
     actions = z["data/action"][:]
+    is_human_teaching = z["data/is_human_teaching"][:]
 
     # 图像数据
     d400_imgs = z["data/d400_camera_img"]
@@ -93,6 +95,8 @@ def main(
     # 转换数据
     episode_starts = np.concatenate([[0], episode_ends[:-1]])
 
+    total_frames = 0
+    dropped_frames = 0
     for ep_idx in tqdm.tqdm(selected_episodes, desc="Converting episodes"):
         start_idx = episode_starts[ep_idx]
         end_idx = episode_ends[ep_idx]
@@ -103,8 +107,28 @@ def main(
         tcp_pose_batch = tcp_pose[start_idx:end_idx]
         tcp_wrench_batch = tcp_wrench[start_idx:end_idx]
         actions_batch = actions[start_idx:end_idx]
+        teaching_batch = is_human_teaching[start_idx:end_idx]
 
-        for i in range(len(d400_batch)):
+        # 计算每帧的有效掩码：仅在首次切换到示教模式后丢弃 N 帧
+        ep_len = len(d400_batch)
+        valid_mask = np.ones(ep_len, dtype=bool)
+        if drop_frames_after_human_teaching > 0:
+            first_teaching_idx = None
+            for i in range(ep_len):
+                if teaching_batch[i]:
+                    first_teaching_idx = i
+                    break
+            if first_teaching_idx is not None:
+                drop_end = min(first_teaching_idx + 1 + drop_frames_after_human_teaching, ep_len)
+                valid_mask[first_teaching_idx + 1 : drop_end] = False
+
+        total_frames += ep_len
+        dropped_frames += int(np.sum(~valid_mask))
+
+        frame_added = False
+        for i in range(ep_len):
+            if not valid_mask[i]:
+                continue
             state = np.concatenate([tcp_pose_batch[i], tcp_wrench_batch[i]]).astype(np.float32)
 
             dataset.add_frame(
@@ -116,8 +140,15 @@ def main(
                     "task": task,
                 }
             )
+            frame_added = True
 
-        dataset.save_episode()
+        if frame_added:
+            dataset.save_episode()
+
+    if drop_frames_after_human_teaching > 0:
+        print(
+            f"\n帧过滤统计: 总帧数={total_frames}, 丢弃帧数={dropped_frames}, 保留帧数={total_frames - dropped_frames}"
+        )
 
     # LeRobot >= v2.1 writes metadata/stats incrementally in save_episode, so consolidate is a no-op.
     if hasattr(dataset, "consolidate"):
