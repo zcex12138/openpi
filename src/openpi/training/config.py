@@ -518,6 +518,81 @@ class LeRobotFrankaDataConfigV2(DataConfigFactory):
 
 
 @dataclasses.dataclass(frozen=True)
+class LeRobotFrankaTactileDataConfig(LeRobotFrankaDataConfigV2):
+    """Data config for Franka with tactile sensing (xense1_marker3d).
+
+    Extends LeRobotFrankaDataConfigV2 to include tactile point cloud input.
+    """
+
+    tactile_key: str = "observation.tactile.xense1_marker3d"
+
+    repack_transforms: tyro.conf.Suppress[_transforms.Group] = dataclasses.field(
+        default=_transforms.Group(
+            inputs=[
+                _transforms.RepackTransform(
+                    {
+                        "observation/image": "observation.images.l500",
+                        "observation/wrist_image": "observation.images.d400",
+                        "observation/state": "observation.state",
+                        "observation/tactile": "observation.tactile.xense1_marker3d",
+                        "actions": "observation.state",
+                    }
+                )
+            ]
+        )
+    )
+
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+        data_transforms = _transforms.Group(
+            inputs=[
+                _transforms.ShiftedStateToAction(
+                    state_key="observation/state",
+                    action_key="actions",
+                    pose_dims=slice(0, self.dataset_action_dim),
+                    additional_shift=self.state_to_action_shift,
+                ),
+                _transforms.SelectStateFrame(
+                    state_key="observation/state",
+                    frame_index=0,
+                ),
+                franka_policy.FrankaInputs(
+                    model_type=model_config.model_type,
+                    state_dim=self.dataset_state_dim,
+                    tactile_key="observation/tactile",
+                ),
+            ],
+            outputs=[franka_policy.FrankaOutputs(action_dim=self.dataset_action_dim)],
+        )
+
+        if self.use_relative_translation:
+            translation_delta_mask = _transforms.make_bool_mask(
+                self.translation_dim, -(self.dataset_action_dim - self.translation_dim)
+            )
+            # Build output transforms: scale delta actions, then convert to absolute
+            output_transforms = []
+            if self.translation_scale != 1.0:
+                output_transforms.append(_transforms.ScaleActions(self.translation_scale, translation_delta_mask))
+            output_transforms.append(_transforms.AbsoluteActions(translation_delta_mask))
+
+            data_transforms = data_transforms.push(
+                inputs=[_transforms.DeltaActions(translation_delta_mask)],
+                outputs=output_transforms,
+            )
+
+        model_transforms = ModelTransformFactory(default_prompt=self.default_prompt)(model_config)
+
+        return dataclasses.replace(
+            self.create_base_config(assets_dirs, model_config),
+            repack_transforms=self.repack_transforms,
+            data_transforms=data_transforms,
+            model_transforms=model_transforms,
+            action_sequence_keys=("observation.state",),
+            state_to_action_shift=self.state_to_action_shift,
+        )
+
+
+@dataclasses.dataclass(frozen=True)
 class RLDSDroidDataConfig(DataConfigFactory):
     """
     Config for training on DROID, using RLDS data format (for efficient training on larger datasets).
@@ -937,7 +1012,7 @@ _CONFIGS = [
             action_expert_variant="gemma_300m_lora",
         ),
         data=LeRobotFrankaDataConfigV2(
-            repo_id="2026_0105_pi05_franka_cola_lerobot_v2.0",
+            repo_id="2026_0130_pi05_franka_cola_lerobot_v2.0",
             base_config=DataConfig(prompt_from_task=True),
             dataset_action_dim=8,
             dataset_state_dim=7,
@@ -974,7 +1049,7 @@ _CONFIGS = [
             action_expert_variant="gemma_300m_lora",
         ),
         data=LeRobotFrankaDataConfigV2(
-            repo_id="2026_0126_pi05_franka_cola_lerobot_v2.1",
+            repo_id="2026_0130_pi05_franka_cola_lerobot_v2.0",
             base_config=DataConfig(prompt_from_task=True),
             dataset_action_dim=8,
             dataset_state_dim=8,
@@ -1004,33 +1079,30 @@ _CONFIGS = [
         ema_decay=None,
     ),
     TrainConfig(
-        # Continue training from pi05_franka_position_control_lora/6000 checkpoint
-        # with new cola dataset, using shifted state as action targets.
-        name="pi05_franka_cola_lora_finetune",
+        name="pi05_franka_tactile_lora",
         model=pi0_config.Pi0Config(
             pi05=True,
             action_horizon=30,
             paligemma_variant="gemma_2b_lora",
             action_expert_variant="gemma_300m_lora",
+            tactile_enabled=True,
         ),
-        data=LeRobotFrankaDataConfigV2(
-            repo_id="2026_0126_pi05_franka_cola_lerobot_v2.1",
+        data=LeRobotFrankaTactileDataConfig(
+            repo_id="2026_0130_pi05_franka_cola_lerobot_v2.0",
             base_config=DataConfig(prompt_from_task=True),
             dataset_action_dim=8,
-            dataset_state_dim=7,
+            dataset_state_dim=8,
             default_prompt="open the can with the screwdriver",
+            use_relative_translation=True,
         ),
-        # Load weights from the trained checkpoint
-        weight_loader=weight_loaders.CheckpointWeightLoader(
-            "./data/checkpoints/pi05_franka_position_control_lora/6000/params"
-        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("./data/checkpoints/pi05_base/params"),
         lr_schedule=_optimizer.CosineDecaySchedule(
             warmup_steps=500,
             peak_lr=1.5e-5,
             decay_steps=12_000,
             decay_lr=1.0e-6,
         ),
-        num_train_steps=3000,
+        num_train_steps=6050,
         batch_size=64,
         num_workers=8,
         log_interval=100,
@@ -1042,6 +1114,7 @@ _CONFIGS = [
             action_horizon=30,
             paligemma_variant="gemma_2b_lora",
             action_expert_variant="gemma_300m_lora",
+            tactile_enabled=True,
         ).get_freeze_filter(),
         ema_decay=None,
     ),

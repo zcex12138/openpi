@@ -9,6 +9,7 @@ from typing_extensions import override
 
 from openpi.models import model as _model
 from openpi.models import pi0_config
+from openpi.models.tactile_encoder import TactileCNNEncoder
 import openpi.models.gemma as _gemma
 import openpi.models.siglip as _siglip
 from openpi.shared import array_typing as at
@@ -99,6 +100,16 @@ class Pi0(_model.BaseModel):
             self.action_time_mlp_out = nnx.Linear(action_expert_config.width, action_expert_config.width, rngs=rngs)
         self.action_out_proj = nnx.Linear(action_expert_config.width, config.action_dim, rngs=rngs)
 
+        # Tactile encoder (optional)
+        self.tactile_enabled = config.tactile_enabled
+        if config.tactile_enabled:
+            self.tactile_encoder = TactileCNNEncoder(
+                output_dim=paligemma_config.width,
+                hidden_dims=config.tactile_hidden_dims,
+                dropout=config.tactile_dropout,
+                rngs=rngs,
+            )
+
         # This attribute gets automatically set by model.train() and model.eval().
         self.deterministic = True
 
@@ -123,6 +134,14 @@ class Pi0(_model.BaseModel):
             )
             # image tokens attend to each other
             ar_mask += [False] * image_tokens.shape[1]
+
+        # embed tactile (optional)
+        if self.tactile_enabled and obs.tactile is not None:
+            tactile_token = self.tactile_encoder(obs.tactile, train=not self.deterministic)
+            tokens.append(tactile_token)
+            batch_size = obs.tactile.shape[0]
+            input_mask.append(jnp.ones((batch_size, 1), dtype=jnp.bool_))
+            ar_mask += [False]  # tactile attends to all prefix tokens
 
         # add language (aka tokenized inputs)
         if obs.tokenized_prompt is not None:

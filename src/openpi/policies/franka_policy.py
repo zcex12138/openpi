@@ -15,6 +15,7 @@ def make_franka_example() -> dict:
         "observation/image": np.random.randint(256, size=(224, 224, 3), dtype=np.uint8),
         "observation/wrist_image": np.random.randint(256, size=(224, 224, 3), dtype=np.uint8),
         "observation/state": np.random.rand(7),
+        "observation/tactile": np.random.rand(26, 14, 3).astype(np.float32),
         "prompt": "do something",
     }
 
@@ -66,6 +67,7 @@ class FrankaInputs(transforms.DataTransformFn):
     state_dim: int | None = 7  # None means use all dimensions
     normalize_quat_sign: bool = True  # Normalize quaternion sign for consistency
     quat_indices: tuple[int, int, int, int] = (3, 4, 5, 6)  # (qw, qx, qy, qz) indices
+    tactile_key: str | None = None
 
     def __call__(self, data: dict) -> dict:
         base_image = _parse_image(data[self.base_image_key])
@@ -106,6 +108,9 @@ class FrankaInputs(transforms.DataTransformFn):
             if isinstance(prompt, bytes):
                 prompt = prompt.decode("utf-8")
             inputs["prompt"] = prompt
+
+        if self.tactile_key is not None and self.tactile_key in data:
+            inputs["tactile"] = np.asarray(data[self.tactile_key], dtype=np.float32)
 
         return inputs
 

@@ -58,6 +58,7 @@ class RealEnvConfig:
     # Impedance control
     impedance_translational_stiffness: float = 1400.0
     impedance_rotational_stiffness: float = 80.0
+    impedance_exponential_decay: float = 0.005
 
     # Cartesian control
     cartesian_velocity_factor: float = 0.05
@@ -99,6 +100,10 @@ class RealEnvConfig:
     teaching_load_com: list[float] = field(default_factory=lambda: [0.0, 0.0, 0.0])
     teaching_load_inertia: list[float] = field(default_factory=lambda: [0.001, 0, 0, 0, 0.001, 0, 0, 0, 0.001])
 
+    # Motion scale for impedance control (amplify small movements to overcome stiction)
+    translation_scale: float = 1.0
+    rotation_scale: float = 1.0
+
     # Real-Time Chunking (RTC)
     rtc_enabled: bool = False
     rtc_inference_delay: int = 3
@@ -139,6 +144,7 @@ class RealEnvConfig:
             max_pos_speed=get_nested(cfg, ["motion", "max_pos_speed"], 0.5),
             impedance_translational_stiffness=get_nested(cfg, ["impedance", "translational_stiffness"], 1400.0),
             impedance_rotational_stiffness=get_nested(cfg, ["impedance", "rotational_stiffness"], 80.0),
+            impedance_exponential_decay=get_nested(cfg, ["impedance", "exponential_decay"], 0.005),
             cartesian_velocity_factor=get_nested(cfg, ["cartesian", "velocity_factor"], 0.05),
             action_smoothing_alpha=get_nested(cfg, ["smoothing", "alpha"], 0.1),
             gripper_interpolation_duration=get_nested(cfg, ["gripper", "interpolation_duration"], 1.4),
@@ -167,6 +173,9 @@ class RealEnvConfig:
             rtc_enabled=get_nested(cfg, ["rtc", "enabled"], False),
             rtc_inference_delay=get_nested(cfg, ["rtc", "inference_delay"], 3),
             rtc_execute_horizon=get_nested(cfg, ["rtc", "execute_horizon"], 5),
+            # Motion scale
+            translation_scale=get_nested(cfg, ["motion", "translation_scale"], 1.0),
+            rotation_scale=get_nested(cfg, ["motion", "rotation_scale"], 1.0),
         )
 
 
@@ -205,6 +214,8 @@ class FrankaRealEnv:
         auto_reset_on_disconnect: bool | None = None,
         action_smoothing_alpha: float | None = None,
         cartesian_velocity_factor: float | None = None,
+        translation_scale: float | None = None,
+        rotation_scale: float | None = None,
     ) -> None:
         # Load config from file or use provided config
         if config is not None:
@@ -234,6 +245,7 @@ class FrankaRealEnv:
             if impedance_rotational_stiffness is not None
             else self._config.impedance_rotational_stiffness
         )
+        self._impedance_exponential_decay = self._config.impedance_exponential_decay
         self._gripper_command_interval_s = (
             gripper_command_interval_s
             if gripper_command_interval_s is not None
@@ -250,6 +262,8 @@ class FrankaRealEnv:
             if cartesian_velocity_factor is not None
             else self._config.cartesian_velocity_factor
         )
+        self._translation_scale = translation_scale if translation_scale is not None else self._config.translation_scale
+        self._rotation_scale = rotation_scale if rotation_scale is not None else self._config.rotation_scale
 
         self._robot: Robot | None = None
         self._gripper = None
@@ -406,6 +420,22 @@ class FrankaRealEnv:
 
         # Store for next iteration
         self._last_action = action.copy()
+
+        # Apply motion scale (amplify movements to overcome stiction in impedance control)
+        if self._last_state is not None:
+            # Translation scale: linear extrapolation
+            if self._translation_scale != 1.0:
+                current_pos = self._last_state[:3]
+                target_pos = action[:3]
+                delta_xyz = target_pos - current_pos
+                action[:3] = current_pos + delta_xyz * self._translation_scale
+
+            # Rotation scale: slerp extrapolation
+            if self._rotation_scale != 1.0:
+                current_affine = Affine(0.0, 0.0, 0.0, *self._last_state[3:7].astype(float))
+                target_affine = Affine(0.0, 0.0, 0.0, *action[3:7].astype(float))
+                scaled_affine = current_affine.slerp(target_affine, self._rotation_scale)
+                action[3:7] = np.asarray(scaled_affine.quaternion(), dtype=np.float32)
 
         # Extract position and gripper
         position = np.asarray(action[:3], dtype=np.float32)
@@ -638,6 +668,15 @@ class FrankaRealEnv:
         if self._robot is None:
             raise RuntimeError("Robot not connected. Call connect() first.")
         self._stop_waypoint_motion()
+        try:
+            self._robot.set_load(
+                self._config.teaching_load_mass,
+                [0.0, 0.0, 0.0],
+                [0.001, 0, 0, 0, 0.001, 0, 0, 0, 0.001],
+            )
+            logger.info("Set load mass: %.3f kg", self._config.teaching_load_mass)
+        except Exception as e:
+            logger.warning("set_load failed: %s", e)
         if self._impedance_translational_stiffness is None and self._impedance_rotational_stiffness is None:
             self._impedance_motion = ImpedanceMotion()
         else:
@@ -647,10 +686,12 @@ class FrankaRealEnv:
                 float(self._impedance_translational_stiffness),
                 float(self._impedance_rotational_stiffness),
             )
+        self._impedance_motion.exponential_decay = self._impedance_exponential_decay
         logger.debug(
-            "Impedance stiffness: translational=%.1f, rotational=%.1f",
+            "Impedance stiffness: translational=%.1f, rotational=%.1f, exponential_decay=%.4f",
             float(self._impedance_translational_stiffness),
             float(self._impedance_rotational_stiffness),
+            self._impedance_exponential_decay,
         )
         # Use direct robot state to avoid stale impedance state during startup.
         current_affine = self._get_current_affine(force_robot_state=True)

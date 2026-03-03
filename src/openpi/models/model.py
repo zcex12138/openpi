@@ -106,6 +106,9 @@ class Observation(Generic[ArrayT]):
     # Token loss mask (for FAST autoregressive model).
     token_loss_mask: at.Bool[ArrayT, "*b l"] | None = None
 
+    # Tactile point cloud (optional modality).
+    tactile: at.Float[ArrayT, "*b th tw tc"] | None = None
+
     @classmethod
     def from_dict(cls, data: at.PyTree[ArrayT]) -> "Observation[ArrayT]":
         """This method defines the mapping between unstructured data (i.e., nested dict) to the structured Observation format."""
@@ -126,6 +129,7 @@ class Observation(Generic[ArrayT]):
             tokenized_prompt_mask=data.get("tokenized_prompt_mask"),
             token_ar_mask=data.get("token_ar_mask"),
             token_loss_mask=data.get("token_loss_mask"),
+            tactile=data.get("tactile"),
         )
 
     def to_dict(self) -> at.PyTree[ArrayT]:
@@ -205,6 +209,7 @@ def preprocess_observation(
         tokenized_prompt_mask=observation.tokenized_prompt_mask,
         token_ar_mask=observation.token_ar_mask,
         token_loss_mask=observation.token_loss_mask,
+        tactile=observation.tactile,
     )
 
 
@@ -236,6 +241,18 @@ class BaseModelConfig(abc.ABC):
         graphdef, state = nnx.split(model)
         if remove_extra_params:
             params = ocp.transform_utils.intersect_trees(state.to_pure_dict(), params)
+
+        # Fix rngs shape mismatch between flax versions (key: (2,) -> ())
+        def _fix_rngs_shape(expected_tree, params_tree):
+            def _fix(kp, exp, got):
+                if "rngs" in jax.tree_util.keystr(kp) and exp.shape != got.shape:
+                    if exp.shape == () and got.shape == (2,):
+                        return got[0]
+                return got
+            return jax.tree_util.tree_map_with_path(_fix, expected_tree, params_tree)
+
+        params = _fix_rngs_shape(state.to_pure_dict(), params)
+
         at.check_pytree_equality(expected=state.to_pure_dict(), got=params, check_shapes=True, check_dtypes=False)
         state.replace_by_pure_dict(params)
         return nnx.merge(graphdef, state)

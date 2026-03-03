@@ -19,287 +19,89 @@ Keep this managed block so 'openspec update' can refresh the instructions.
 
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+openpi 是 Physical Intelligence 开源的机器人 VLA 模型仓库（π₀ / π₀-FAST / π₀.₅），本项目仅在 **Franka** 平台上实验。
 
-## 项目概述
+## 安装
 
-openpi 是 Physical Intelligence 开源的机器人视觉-语言-动作（VLA）模型仓库。包含三种模型架构：
-- **π₀ (pi0)**：基于流匹配的 VLA 模型
-- **π₀-FAST (pi0_fast)**：使用 FAST 动作分词器的自回归 VLA
-- **π₀.₅ (pi05)**：通过知识隔离技术升级的 π₀，具有更好的开放世界泛化能力
+参考：`INSTALL.md`（主环境）、`examples/franka/INSTALL.md`（Franka 子环境 Python 3.9）
 
-代码库同时支持 JAX（主要）和 PyTorch 实现。
+## 代码结构
 
-## 常用命令
+| 层 | 路径 | 说明 |
+|---|------|------|
+| 模型 | `src/openpi/models/` | `model.py` 基础接口，`pi0.py` 流匹配实现 |
+| 策略 | `src/openpi/policies/` | `policy.py` 推理封装，`*_policy.py` 平台适配 |
+| 训练 | `src/openpi/training/config.py` | 所有配置定义在 `_CONFIGS` 列表 |
+| 变换 | `src/openpi/transforms.py` | 数据管道：`RepackTransform` → `data_transforms` → 归一化 → `model_transforms` |
 
-### 环境配置
-```bash
-# 克隆仓库（含子模块）
-git clone --recurse-submodules git@github.com:Physical-Intelligence/openpi.git
+## Franka 配置
 
-# 安装依赖（需要先安装 uv）
-GIT_LFS_SKIP_SMUDGE=1 uv sync
-GIT_LFS_SKIP_SMUDGE=1 uv pip install -e .
-```
+配置定义：`src/openpi/training/config.py`，命名模式 `pi05_franka_*_lora`
 
-### 训练
-```bash
-# 训练前先计算归一化统计量（必需）
-uv run scripts/compute_norm_stats.py --config-name <config_name>
-
-# JAX 训练
-XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 uv run scripts/train.py <config_name> --exp-name=<experiment_name>
-
-# PyTorch 单卡训练
-uv run scripts/train_pytorch.py <config_name> --exp_name <run_name>
-
-# PyTorch 多卡训练
-uv run torchrun --standalone --nnodes=1 --nproc_per_node=<num_gpus> scripts/train_pytorch.py <config_name> --exp_name <run_name>
-```
-
-### 推理服务
-```bash
-# 启动默认策略服务（按环境选择）
-uv run scripts/serve_policy.py --env=[DROID | ALOHA | LIBERO | ALOHA_SIM]
-
-# 启动自定义检查点服务
-uv run scripts/serve_policy.py policy:checkpoint --policy.config=<config_name> --policy.dir=<checkpoint_path>
-```
-
-### 测试
-```bash
-# 运行所有测试
-uv run pytest
-
-# 运行单个测试文件
-uv run pytest src/openpi/models/pi0_test.py
-
-# 详细输出
-uv run pytest -v
-```
-
-### 代码检查
-```bash
-ruff check .
-ruff format .
-pre-commit run --all-files
-```
-
-## 架构概览
-
-### 核心模块
-
-**模型层 (`src/openpi/models/`)**：
-- `model.py`：基础模型接口，定义 `Observation`、`Actions` 和 `BaseModel` 抽象类
-- `pi0.py`：流匹配 π₀ 实现，使用 PaliGemma 主干 + 动作专家网络
-- `pi0_fast.py`：自回归 FAST 变体
-- `gemma.py`、`siglip.py`：底层 Transformer 和视觉编码器
-- `tokenizer.py`：文本和动作分词（PaligemmaTokenizer、FASTTokenizer）
-
-**策略层 (`src/openpi/policies/`)**：
-- `policy.py`：`Policy` 类，封装模型和变换用于推理
-- `policy_config.py`：`create_trained_policy()` 工厂函数，用于加载检查点
-- `*_policy.py`（aloha、droid、libero）：机器人平台特定的输入/输出变换
-
-**训练层 (`src/openpi/training/`)**：
-- `config.py`：所有训练配置定义在 `_CONFIGS` 列表中，使用 `get_config(name)` 获取
-- `data_loader.py`：LeRobot 和 RLDS 数据加载
-- `weight_loaders.py`：检查点权重加载工具
-- `checkpoints.py`：检查点保存/恢复逻辑
-
-**变换层 (`src/openpi/transforms.py`)**：
-- 数据管道变换（归一化、分词、缩放、增量动作）
-- `Group` 类组织输入/输出变换
-- `RepackTransform` 将数据集键映射到模型期望的键
-
-### 数据流
-
-1. **训练**：原始数据 → `repack_transforms` → `data_transforms` → 归一化 → `model_transforms` → 模型
-2. **推理**：观测字典 → 变换（同训练）→ `policy.infer()` → `output_transforms` → 反归一化 → 动作
-
-### 关键设计模式
-
-**配置系统**：所有配置都是 `src/openpi/training/config.py` 中的 dataclass。训练配置包含：
-- 模型配置（架构、维度）
-- 数据配置工厂（数据集、变换）
-- 权重加载器（预训练检查点）
-- 超参数（学习率、批大小、步数）
-
-**机器人适配器**：每个机器人平台有专门的输入/输出变换类（如 `AlohaInputs`、`DroidOutputs`），处理：
-- 机器人传感器与模型期望之间的键映射
-- 状态/动作空间转换
-- 坐标系变换
-
-**远程推理**：`openpi-client` 包（`packages/openpi-client/`）提供轻量级 websocket 客户端，用于从机器人代码查询策略服务器。
-
-## 可用训练配置
-
-主要配置（完整列表见 `src/openpi/training/config.py`）：
-- `pi0_aloha`、`pi05_aloha`：ALOHA 机器人推理
-- `pi0_droid`、`pi05_droid`、`pi0_fast_droid`：DROID 机器人推理
-- `pi0_libero`、`pi05_libero`、`pi0_fast_libero`：LIBERO 基准训练
-- `pi05_franka_screwdriver_lora`：Franka Panda LoRA 微调示例（LeRobot v2，repo_id `single_arm_screwdriver`）
-- `pi0_aloha_sim`：ALOHA 仿真训练
-- `debug`、`debug_pi05`：快速迭代调试配置
-
-### Franka（LeRobot v2）配置片段
-
-配置名：`pi05_franka_screwdriver_lora`（定义位置：`src/openpi/training/config.py`）。要点摘要：
-- 数据配置：`LeRobotFrankaDataConfig`（LeRobot v2），`repo_id=single_arm_screwdriver`；动作维度 8（末尾 gripper 1 维），`use_delta_joint_actions=False`，`default_prompt="open the can with the screwdriver"`。
-- 关键映射：`observation/image -> observation.images.l500`，`observation/wrist_image -> observation.images.d400`，`observation/state -> observation.state`，`actions -> action`。
-- 变换：`FrankaInputs/FrankaOutputs`，可选 delta/absolute 动作变换；`ModelTransformFactory(default_prompt=...)`。
-- 模型：`pi05=True`，`action_horizon=30`，`paligemma_variant="gemma_2b_lora"`，`action_expert_variant="gemma_300m_lora"`（`action_dim` 默认 32，需匹配 `pi05_base` checkpoint）。
-- 训练：`weight_loader="./data/checkpoints/pi05_base/params"`；`CosineDecaySchedule(warmup=500, peak_lr=1.5e-5, decay_steps=12000, decay_lr=1e-6)`；`num_train_steps=12000`，`batch_size=64`，`num_workers=8`，`log_interval=100`，`save_interval=500`，`keep_period=2000`，`ema_decay=None`；`freeze_filter` 来自 `Pi0Config(pi05=True, action_dim=8, action_horizon=30, ...).get_freeze_filter()`。
+- 数据：`LeRobotFrankaDataConfig`，动作维度 8
+- 模型：`pi05=True`，`action_horizon=30`，LoRA 微调
+- 变换：`FrankaInputs` / `FrankaOutputs`
 
 ## Franka 机器人控制
 
-### frankx 运动库
+frankx 库：`/home/mpi/workspace/yhx/frankx`（API 详见仓库 README）
 
-位置：`/home/mpi/workspace/yhx/frankx`
+约定：四元数 `(w,x,y,z)`，单位 [m]/[rad]。`real_env.py` 通过 `set_EE(constants.DEFAULT_EE_TRANSFORM)` 设置末端坐标系，修改前需确认与数据采集时一致。
 
-frankx 是 Franka Emika 机器人的高层次运动库，提供 C++ 和 Python 双接口。它封装了 libfranka，使用 Ruckig 实现在线轨迹生成（OTG），支持 jerk 约束。
+**安全**：控制真实机器人前确认急停可用、速度/力矩限制合理、工作空间无碰撞风险。
 
-**核心 API**：
-- `Robot`：机器人连接与运动控制（`robot.move(motion)`、`set_dynamic_rel()`、`current_pose()`）
-- `Gripper`：夹爪控制（`clamp()`、`release()`、`move()`）
-- `Affine`：SE(3) 变换封装（Eigen::Affine3d 的薄包装），支持欧拉角（ZYX 约定）
-- 运动类型：`JointMotion`、`LinearMotion`、`LinearRelativeMotion`、`WaypointMotion`、`PositionHold`
-- `MotionData`：动态参数调整与实时反应（`with_reaction()`）
+## 工作流
 
-**构建与安装**：
+权威流程文档：`examples/franka/评估_录制_转换_可视化.md`
+
+快速参考（远程推理模式）：
 ```bash
-cd /home/mpi/workspace/yhx/frankx
-git submodule update --init --recursive
-mkdir -p build && cd build
-cmake -DBUILD_TYPE=Release .. && make && make install
-# 或 Python 模块安装
-pip install .
+# 1. 启动相机服务（Python 3.9 环境，在项目根目录执行）
+python examples/franka/camera_service.py
+
+# 2. 启动策略服务（主环境）
+uv run scripts/serve_policy.py policy:checkpoint \
+    --policy.config=<config_name> --policy.dir=<checkpoint_path>
+
+# 3. 运行评估（Python 3.9 环境，在项目根目录执行）
+python examples/franka/main.py \
+    --args.remote-host localhost --args.remote-port 8000 \
+    --args.control-mode impedance
 ```
 
-**坐标与单位**：距离单位 [m]，旋转单位 [rad]，四元数顺序 `(w, x, y, z)`。
-
-### Franka 坐标系与四元数注意事项
-- 观测/动作四元数顺序为 `(w, x, y, z)`。
-- `frankx` 默认行为在 `setDefaultBehavior()` 中设置 `NE_T_EE = Rx(pi)`，但本项目在 `examples/franka/real_env.py` 会调用 `set_EE(constants.DEFAULT_EE_TRANSFORM)` 覆盖该值。
-- 若出现姿态偏差，优先核对 `examples/franka/constants.py` 中的 `DEFAULT_EE_TRANSFORM` 与采集时一致（通常为单位阵），避免在观测/动作上叠加手动补偿。
-
-## Franka 评估示例 (`examples/franka/`)
-
-### 虚拟环境
-
-位置：`/home/mpi/workspace/yhx/openpi/examples/franka/.venv`（Python 3.9）
-
-该环境独立于主 openpi 环境，用于相机服务和机器人控制，因为 RealSense/Xense 驱动需要 Python 3.9。
-
-**安装依赖**（见 `INSTALL.md`）：
-```bash
-source /home/mpi/workspace/yhx/openpi/examples/franka/.venv/bin/activate
-# RealSense
-uv pip install pyrealsense2-2.53.1.4623-cp39-cp39-manylinux1_x86_64
-# Xense（可选）
-uv pip install nvidia-cudnn-cu11==8.9.2.26 nvidia-cuda-runtime-cu11 onnxruntime-gpu==1.18.0
-pip install xensesdk==1.6.0 -i https://repo.huaweicloud.com/repository/pypi/simple/
-# frankx
-cd /home/mpi/workspace/yhx/frankx && uv pip install -e .
-# openpi-client
-uv pip install -e packages/openpi-client && uv pip install tyro
-```
-
-### 架构与流程
-
-```
-+----------------+     +------------------+     +--------------------+
-| Policy Server  |<--->| examples/franka  |<--->| Camera Service     |
-| (serve_policy) | WS  | /main.py         | IPC | (Python 3.9, RDP)  |
-+----------------+     +--------+---------+     +--------------------+
-                                |
-                                | FCI/IP
-                                v
-                       +----------------+
-                       | Franka Robot   |
-                       | (frankx 直连)   |
-                       +----------------+
-```
-
-**评估流程**：
-1. **启动相机服务**（Python 3.9 环境）：
-   ```bash
-   source examples/franka/.venv/bin/activate
-   PYTHONPATH=/home/mpi/workspace/yhx/openpi python examples/franka/camera_service.py
-   ```
-2. **确认 FCI 可连接**：机器人处于可控状态，FCI IP 可访问（frankx 直连，无需额外服务）。
-3. **启动 Policy Server**（主 openpi 环境）：
-   ```bash
-   source .venv/bin/activate
-   uv run scripts/serve_policy.py policy:checkpoint \
-       --policy.config=pi05_franka_screwdriver_lora \
-       --policy.dir=./data/checkpoints/pi05_franka_screwdriver_lora/10000
-   ```
-4. **运行评估**：
-   ```bash
-   PYTHONPATH=/home/mpi/workspace/yhx/openpi python examples/franka/main.py \
-       --args.remote-host localhost --args.remote-port 8000 \
-       --args.control-mode cartesian --args.prompt "open the can with the screwdriver"
-   ```
-
-### 关键文件
+关键文件：
 
 | 文件 | 说明 |
 |------|------|
-| `main.py` | 评估主入口，支持本地/远程推理 |
-| `real_env.py` | 机器人状态/动作底层处理，调用 frankx |
-| `env.py` | 面向 openpi runtime 的 FrankaEnvironment 封装 |
+| `main.py` | 评估入口，websocket 连接策略服务 |
+| `real_env.py` | 机器人底层控制（frankx） |
 | `camera_service.py` | IPC 相机服务（Python 3.9） |
-| `camera_client.py` | 相机服务客户端 |
-| `pkl_recorder.py` | episode 级 PKL 录制器（运行时 Subscriber） |
-| `convert_pkl_to_lerobot.py` | PKL 转 LeRobot v2 数据集 |
-| `constants.py` | 默认配置常量（从 `camera_config.yaml` 加载） |
-| `visualize_online_trajectory.py` | 实时可视化 TCP 位姿与目标 |
-| `visualize_wrench.py` | 实时可视化力/力矩 |
+| `collect_data.py` | 零重力示教连续数据采集（30Hz） |
+| `collect_single_frame.py` | 零重力示教单帧数据采集（按 Enter 采集） |
+| `convert_pkl_to_zarr.py` | PKL 转 Zarr |
+| `camera_config.yaml` | 相机配置（设备序列号、分辨率、帧率） |
+| `real_env_config.yaml` | 机器人环境配置（IP、限位、控制参数） |
 
-### 数据格式
+## 数据格式
 
-**观测（Observation）**：
-- `observation/image`：底座相机（L500），224×224×3 uint8
-- `observation/wrist_image`：腕部相机（D400/Xense），224×224×3 uint8
-- `observation/state`：14 维 float32（TCP 位姿 7 维 + GRIPPER 1 维 + 6 维力）
+参考 Zarr 数据集：`eval_records/pi05_franka_position_control_lora/20260126/replay_buffer.zarr`
 
-**动作（Action）**：8 维 float32 `[x, y, z, qw, qx, qy, qz, gripper]`
+| 键 | 形状 | dtype | 说明 |
+|----|------|-------|------|
+| `robot_tcp_pose` | (N,8) | float32 | [x,y,z,qw,qx,qy,qz,gripper]，绝对位姿，gripper∈[0,1] |
+| `robot_tcp_wrench` | (N,6) | float32 | 力/力矩 [fx,fy,fz,tx,ty,tz] |
+| `action` | (N,8) | float32 | 同 tcp_pose 格式，绝对目标位姿 |
+| `l500_camera_img` | (N,270,480,3) | uint8 | 底座相机 RGB |
+| `d400_camera_img` | (N,240,320,3) | uint8 | 腕部相机 RGB |
+| `xense1_camera_img` | (N,350,200,3) | uint8 | Xense 触觉相机 RGB |
+| `xense1_marker3d` | (N,26,14,3) | float32 | Xense 3D 标记点 |
+| `timestamp` | (N,) | float32 | 秒级时间戳 |
+| `is_human_teaching` | (N,) | uint8 | 示教标记 |
+| `meta/episode_ends` | (E,) | int64 | episode 结束索引 |
 
+## RTC 模式
 
-### 录制与转换（PKL）
-
-- 评估时加 `--record-pkl` 可启用 episode 级 PKL 录制，默认输出到 `eval_records/<config_name>/episode_###.pkl`。
-- 转换脚本：`examples/franka/convert_pkl_to_lerobot.py`，保持现有 LeRobot key；如需本地保存，设置 `HF_LEROBOT_HOME=/home/mpi/workspace/yhx/openpi/data/dataset`。
-
-### 本地数据集路径
-- 使用 HF_LEROBOT_HOME 将默认数据集地址设置为本地
-`export HF_LEROBOT_HOME=/home/mpi/workspace/yhx/openpi/data/dataset`
-
-### Real-Time Chunking (RTC) 模式
-
-RTC 模式通过重叠推理与执行来降低有效控制延迟。在模型推理期间，机器人继续执行先前生成的动作，新 chunk 通过 prefix conditioning 保持时序一致性。
-
-**启用 RTC 模式**：
-```bash
-PYTHONPATH=/home/mpi/workspace/yhx/openpi python examples/franka/main.py \
-    --args.remote-host localhost --args.remote-port 8000 \
-    --args.rtc --args.rtc-inference-delay 3 --args.rtc-execute-horizon 5
-```
-
-**参数说明**：
-| 参数 | 默认值 | 说明 |
-|------|--------|------|
-| `--args.rtc` | false | 启用 Real-Time Chunking 模式 |
-| `--args.rtc-inference-delay` | 3 | 推理期间执行的旧 chunk 动作数 |
-| `--args.rtc-execute-horizon` | 5 | 每次迭代总执行动作数 |
-
-**工作原理**：
-1. 首次推理生成完整 action chunk (30 步)
-2. 执行前 `inference_delay` 个动作的同时，启动下一次推理
-3. 新 chunk 以正在执行的动作为前缀条件生成，保证轨迹连续性
-4. 融合新旧 chunk，循环执行
-
-**推荐配置**：
-- 推理延迟 ~100ms: `--args.rtc-inference-delay 3 --args.rtc-execute-horizon 5`
-- 推理延迟 ~200ms: `--args.rtc-inference-delay 5 --args.rtc-execute-horizon 8`
+Real-Time Chunking 通过重叠推理与执行降低控制延迟：
+- `--args.rtc`：启用
+- `--args.rtc-inference-delay N`：推理期间执行旧 chunk 动作数（默认 3）
+- `--args.rtc-execute-horizon N`：每轮执行总动作数（默认 5）

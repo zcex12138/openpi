@@ -126,14 +126,15 @@ class FrankaEnvironment(_environment.Environment):
             - observation/image: Base camera image (L500), uint8 (H, W, C)
             - observation/wrist_image: Wrist camera image (D400), uint8 (H, W, C)
             - observation/state: Robot state (14D)
+            - observation/tactile: Tactile marker3d (optional, 26x14x3)
             - prompt: Task instruction
         """
         # Get robot state
         state = self._real_env.get_state()
 
-        # Get camera frames
+        # Get camera frames with markers
         try:
-            frames, _timestamp_ns, seq = self._camera.get_frames()
+            frames, marker3d, _timestamp_ns, seq = self._camera.get_frames_with_markers()
             l500_image = frames["l500_rgb"]
             d400_image = frames["d400_rgb"]
             if self._last_frame_seq is not None and seq == self._last_frame_seq:
@@ -147,6 +148,7 @@ class FrankaEnvironment(_environment.Environment):
             logger.warning("Camera frame retrieval failed: %s, using zero images", e)
             l500_image = np.zeros((self._render_height, self._render_width, 3), dtype=np.uint8)
             d400_image = np.zeros((self._render_height, self._render_width, 3), dtype=np.uint8)
+            marker3d = {}
 
         # Resize images to model input size
         l500_image = image_tools.convert_to_uint8(
@@ -156,12 +158,19 @@ class FrankaEnvironment(_environment.Environment):
             image_tools.resize_with_pad(d400_image, self._render_height, self._render_width)
         )
 
-        return {
+        obs = {
             "observation/image": l500_image,
             "observation/wrist_image": d400_image,
             "observation/state": state,
             "prompt": self._prompt,
         }
+
+        # Add tactile data if available (key: xense_1_marker3d -> observation/tactile)
+        tactile_data = marker3d.get("xense_1_marker3d")
+        if tactile_data is not None and tactile_data.size > 0:
+            obs["observation/tactile"] = tactile_data.astype(np.float32)
+
+        return obs
 
     def get_recording_frame(self) -> dict:
         """Get raw frames + robot state for recording."""

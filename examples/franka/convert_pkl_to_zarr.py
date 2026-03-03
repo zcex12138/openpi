@@ -21,7 +21,8 @@ import tyro
 import zarr
 
 _DEFAULT_RECORDS = "/home/mpi/workspace/yhx/openpi/demo_records/"
-_DEFAULT_RECORDS = "/home/mpi/workspace/yhx/openpi/eval_records/pi05_franka_position_control_lora/20260126"
+_DEFAULT_RECORDS = "/home/mpi/workspace/yhx/openpi/eval_records/pi05_franka_cola_lora/20260207"
+_DEFAULT_RECORDS = "data/dataset/dataset_zarr/20260126_失败单帧"
 
 
 @dataclasses.dataclass
@@ -29,6 +30,7 @@ class Args:
     records: str = _DEFAULT_RECORDS
     output_dir: str | None = None
     temporal_downsample_ratio: int = 1
+    drop_frames_after_human_teaching: int = 40
 
 
 def _collect_pkl_files(records_path: Path) -> list[Path]:
@@ -122,6 +124,20 @@ def _process_episode(episode: dict) -> dict[str, np.ndarray] | None:
     return result
 
 
+def _drop_after_teaching(data: dict[str, np.ndarray], n_drop: int) -> dict[str, np.ndarray]:
+    """Drop n_drop frames immediately after the first human_teaching frame."""
+    teaching = data["is_human_teaching"]
+    ep_len = len(teaching)
+    mask = np.ones(ep_len, dtype=bool)
+    first = np.argmax(teaching)  # 0 if none found
+    if teaching[first]:
+        drop_end = min(first + 1 + n_drop, ep_len)
+        mask[first + 1 : drop_end] = False
+    if mask.all():
+        return data
+    return {k: v[mask] for k, v in data.items()}
+
+
 def _apply_downsample(data: dict[str, np.ndarray], ratio: int) -> dict[str, np.ndarray]:
     if ratio <= 1:
         return data
@@ -169,6 +185,13 @@ def main(args: Args) -> None:
 
         if ep_data is None:
             continue
+
+        if args.drop_frames_after_human_teaching > 0:
+            before = len(ep_data["action"])
+            ep_data = _drop_after_teaching(ep_data, args.drop_frames_after_human_teaching)
+            dropped = before - len(ep_data["action"])
+            if dropped > 0:
+                print(f"  Dropped {dropped} frames after human_teaching")
 
         if args.temporal_downsample_ratio > 1:
             ep_data = _apply_downsample(ep_data, args.temporal_downsample_ratio)

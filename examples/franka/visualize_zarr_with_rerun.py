@@ -996,7 +996,7 @@ Example:
     parser.add_argument(
         "--zarr_path",
         type=str,
-        default="eval_records/pi05_franka_position_control_lora/20260126/replay_buffer.zarr",
+        default="data/dataset/dataset_zarr/20260207_失败轨迹/replay_buffer.zarr",
         # default="demo_records/replay_buffer.zarr",
         help="Path to zarr dataset file",
     )

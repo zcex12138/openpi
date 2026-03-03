@@ -76,6 +76,8 @@ class Args:
     num_episodes: int = _default_config.num_episodes
     action_smoothing_alpha: float | None = None  # None=use config, 0.0=no smoothing, 0.9=heavy
     cartesian_velocity_factor: float | None = None  # Velocity factor for cartesian mode
+    translation_scale: float | None = None  # Scale factor for xyz delta (>1.0 amplifies translation)
+    rotation_scale: float | None = None     # Scale factor for rotation delta via slerp (>1.0 amplifies rotation)
 
     # Task
     prompt: str = _default_config.default_prompt
@@ -228,6 +230,8 @@ def main(args: Args) -> None:
         max_pos_speed=args.max_pos_speed,
         action_smoothing_alpha=args.action_smoothing_alpha,
         cartesian_velocity_factor=args.cartesian_velocity_factor,
+        translation_scale=args.translation_scale,
+        rotation_scale=args.rotation_scale,
     )
 
     # Create camera client

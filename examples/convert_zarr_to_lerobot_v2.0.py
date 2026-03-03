@@ -17,14 +17,14 @@ from lerobot.common.datasets.lerobot_dataset import HF_LEROBOT_HOME, LeRobotData
 
 
 def main(
-    zarr_path: str = "/home/mpi/workspace/yhx/openpi/eval_records/pi05_franka_position_control_lora/20260126/replay_buffer.zarr",
-    repo_id: str = "2026_0126_pi05_franka_cola_lerobot_v2.1",
+    zarr_path: str = "/home/mpi/workspace/yhx/openpi/eval_records/pi05_franka_cola_lora/202601/replay_buffer.zarr",
+    repo_id: str = "2026_0130_pi05_franka_cola_lerobot_v2.0",
     task: str = "open the can with the screwdriver",
     fps: int = 30,
     image_writer_processes: int = 10,
     image_writer_threads: int = 5,
     push_to_hub: bool = False,
-    drop_frames_after_human_teaching: int = 30,
+    drop_frames_after_human_teaching: int = 40,
 ):
     # 清理已存在的数据集
     output_path = HF_LEROBOT_HOME / repo_id
@@ -46,6 +46,13 @@ def main(
     # 状态数据: TCP pose (8维) + wrench (6维) = 14维
     tcp_pose = z["data/robot_tcp_pose"][:]  # (N, 8)
     tcp_wrench = z["data/robot_tcp_wrench"][:]  # (N, 6)
+
+    # 触觉数据 (可选)
+    has_tactile = "data/xense1_marker3d" in z
+    if has_tactile:
+        xense1_marker3d = z["data/xense1_marker3d"]
+        marker3d_shape = xense1_marker3d.shape[1:]  # (26, 14, 3)
+        print(f"  Tactile marker3d 形状: {marker3d_shape}")
 
     # 获取图像尺寸
     d400_img_shape = d400_imgs.shape[1:]  # (H, W, C)
@@ -87,6 +94,17 @@ def main(
                 "shape": (actions.shape[1],),
                 "names": ["action"],
             },
+            **(
+                {
+                    "observation.tactile.xense1_marker3d": {
+                        "dtype": "float32",
+                        "shape": marker3d_shape,
+                        "names": ["row", "col", "xyz"],
+                    },
+                }
+                if has_tactile
+                else {}
+            ),
         },
         image_writer_threads=image_writer_threads,
         image_writer_processes=image_writer_processes,
@@ -108,6 +126,7 @@ def main(
         tcp_wrench_batch = tcp_wrench[start_idx:end_idx]
         actions_batch = actions[start_idx:end_idx]
         teaching_batch = is_human_teaching[start_idx:end_idx]
+        marker3d_batch = xense1_marker3d[start_idx:end_idx] if has_tactile else None
 
         # 计算每帧的有效掩码：仅在首次切换到示教模式后丢弃 N 帧
         ep_len = len(d400_batch)
@@ -131,15 +150,17 @@ def main(
                 continue
             state = np.concatenate([tcp_pose_batch[i], tcp_wrench_batch[i]]).astype(np.float32)
 
-            dataset.add_frame(
-                {
+            frame = {
                     "observation.images.d400": d400_batch[i],
                     "observation.images.l500": l500_batch[i],
                     "observation.state": state,
                     "action": actions_batch[i].astype(np.float32),
                     "task": task,
                 }
-            )
+            if marker3d_batch is not None:
+                frame["observation.tactile.xense1_marker3d"] = marker3d_batch[i].astype(np.float32)
+
+            dataset.add_frame(frame)
             frame_added = True
 
         if frame_added:
