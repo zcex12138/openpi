@@ -1,1 +1,0 @@
-(stopping memory writes now)

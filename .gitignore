@@ -168,9 +168,9 @@ cython_debug/
 #.idea/
 
 # AI
-# AGENTS.md
-# CLAUDE.md
-# openspec
+AGENTS.md
+CLAUDE.md
+openspec
 .claude
 .vscode
 .serena
