@@ -1,6 +1,7 @@
 """Policy transforms for Franka Panda robot."""
 
 import dataclasses
+from typing import Literal
 
 import einops
 import numpy as np
@@ -68,6 +69,7 @@ class FrankaInputs(transforms.DataTransformFn):
     normalize_quat_sign: bool = True  # Normalize quaternion sign for consistency
     quat_indices: tuple[int, int, int, int] = (3, 4, 5, 6)  # (qw, qx, qy, qz) indices
     tactile_key: str | None = None
+    rotation_representation: Literal["quat", "r6d"] = "quat"
 
     def __call__(self, data: dict) -> dict:
         base_image = _parse_image(data[self.base_image_key])
@@ -79,7 +81,7 @@ class FrankaInputs(transforms.DataTransformFn):
         # Normalize quaternion sign to match action target convention.
         # This ensures state input and action target use consistent quaternion signs,
         # preventing the model from learning incorrect rotation mappings.
-        if self.normalize_quat_sign and self.state_dim is not None and self.state_dim >= 7:
+        if self.rotation_representation == "quat" and self.normalize_quat_sign and self.state_dim is not None and self.state_dim >= 7:
             quat_slice = slice(self.quat_indices[0], self.quat_indices[-1] + 1)
             state[..., quat_slice] = _normalize_quat_sign(state[..., quat_slice])
 

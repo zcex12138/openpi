@@ -176,6 +176,7 @@ openspec
 .serena
 .sisyphus
 .ruff_cache
+.codex
 
 # data
 .hf_datasets

@@ -53,6 +53,7 @@ class Policy(BasePolicy):
             is_pytorch: Whether the model is a PyTorch model. If False, assumes JAX model.
         """
         self._model = model
+        self._input_transforms = list(transforms)
         self._input_transform = _transforms.compose(transforms)
         self._output_transform = _transforms.compose(output_transforms)
         self._sample_kwargs = sample_kwargs or {}
@@ -154,6 +155,19 @@ class Policy(BasePolicy):
 
         inputs = jax.tree.map(lambda x: x, obs)
         inputs = self._input_transform(inputs)
+
+        # Auto-convert action_prefix if rotation representation changed (e.g. 8D quat → 10D r6d).
+        # The prefix comes from previous output (post output_transform) and may need
+        # re-conversion to match the model's internal representation.
+        prefix_transforms = [
+            t for t in self._input_transforms
+            if isinstance(t, (_transforms.QuatToRotate6d, _transforms.DeltaRotate6dActions))
+        ]
+        if prefix_transforms:
+            prefix_data = {"state": inputs["state"], "actions": action_prefix}
+            for t in prefix_transforms:
+                prefix_data = t(prefix_data)
+            action_prefix = prefix_data["actions"]
 
         if self._is_pytorch_model:
             inputs = jax.tree.map(lambda x: torch.from_numpy(np.array(x)).to(self._pytorch_device)[None, ...], inputs)

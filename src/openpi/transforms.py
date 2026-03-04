@@ -243,6 +243,164 @@ class AbsoluteActions(DataTransformFn):
 
         return data
 
+@dataclasses.dataclass(frozen=True)
+class ScaleActions(DataTransformFn):
+    """Scale selected action dimensions by a constant factor."""
+
+    scale: float
+    mask: Sequence[bool] | None
+
+    def __call__(self, data: DataDict) -> DataDict:
+        if "actions" not in data or self.mask is None or self.scale == 1.0:
+            return data
+
+        actions = data["actions"]
+        mask = np.asarray(self.mask)
+        dims = mask.shape[-1]
+        actions = actions.copy()
+        actions[..., :dims] = np.where(mask, actions[..., :dims] * self.scale, actions[..., :dims])
+        data["actions"] = actions
+        return data
+
+@dataclasses.dataclass(frozen=True)
+class QuatToRotate6d(DataTransformFn):
+    """Convert quaternion → 6D rotation in state and actions.
+
+    Dimension changes: state 7→9, actions (H, 8) → (H, 10).
+    """
+
+    quat_start: int = 3
+    quat_dim: int = 4
+    rotation_eps: float = 1e-6
+
+    def __call__(self, data: DataDict) -> DataDict:
+        from openpi.shared.rotation import quat_to_rotate6d
+
+        def _convert(arr: np.ndarray) -> np.ndarray:
+            prefix = arr[..., :self.quat_start]
+            quat = arr[..., self.quat_start:self.quat_start + self.quat_dim]
+            suffix = arr[..., self.quat_start + self.quat_dim:]
+            r6d = quat_to_rotate6d(quat)
+            return np.concatenate([prefix, r6d, suffix], axis=-1)
+
+        if "state" in data:
+            data["state"] = _convert(data["state"])
+        if "actions" in data:
+            data["actions"] = _convert(data["actions"])
+        return data
+
+
+@dataclasses.dataclass(frozen=True)
+class Rotate6dToQuat(DataTransformFn):
+    """Convert 6D rotation → quaternion in actions only.
+
+    Dimension changes: actions (H, 10) → (H, 8). State is NOT converted.
+    """
+
+    r6d_start: int = 3
+    r6d_dim: int = 6
+    rotation_eps: float = 1e-6
+
+    def __call__(self, data: DataDict) -> DataDict:
+        from openpi.shared.rotation import rotate6d_to_quat
+
+        if "actions" not in data:
+            return data
+
+        actions = data["actions"]
+        prefix = actions[..., :self.r6d_start]
+        r6d = actions[..., self.r6d_start:self.r6d_start + self.r6d_dim]
+        suffix = actions[..., self.r6d_start + self.r6d_dim:]
+        quat = rotate6d_to_quat(r6d, eps=self.rotation_eps)
+        data["actions"] = np.concatenate([prefix, quat, suffix], axis=-1)
+        return data
+
+
+@dataclasses.dataclass(frozen=True)
+class DeltaRotate6dActions(DataTransformFn):
+    """Convert absolute rotate6d actions to relative (delta) rotation.
+
+    Formula: R_delta = R_target @ R_current^T (active rotation convention).
+    """
+
+    r6d_start: int = 3
+    r6d_dim: int = 6
+    rotation_eps: float = 1e-6
+
+    def __call__(self, data: DataDict) -> DataDict:
+        from openpi.shared.rotation import rotate6d_to_rotmat, rotmat_to_rotate6d
+
+        if "actions" not in data or "state" not in data:
+            return data
+
+        state, actions = data["state"], data["actions"]
+        state_r6d = state[..., self.r6d_start:self.r6d_start + self.r6d_dim]
+        R_current = rotate6d_to_rotmat(state_r6d, eps=self.rotation_eps)
+        R_current_T = np.swapaxes(R_current, -2, -1)
+
+        act_r6d = actions[..., self.r6d_start:self.r6d_start + self.r6d_dim]
+        R_target = rotate6d_to_rotmat(act_r6d, eps=self.rotation_eps)
+        # Broadcast state (…, 3, 3) to actions (…, H, 3, 3)
+        R_delta = np.einsum("...ij,...jk->...ik", R_target, np.expand_dims(R_current_T, axis=-3))
+        delta_r6d = rotmat_to_rotate6d(R_delta)
+
+        actions = actions.copy()
+        actions[..., self.r6d_start:self.r6d_start + self.r6d_dim] = delta_r6d
+        data["actions"] = actions
+        return data
+
+
+@dataclasses.dataclass(frozen=True)
+class AbsoluteRotate6dActions(DataTransformFn):
+    """Convert delta rotate6d actions to absolute rotation.
+
+    Formula: R_target = R_delta @ R_current.
+    """
+
+    r6d_start: int = 3
+    r6d_dim: int = 6
+    rotation_eps: float = 1e-6
+
+    def __call__(self, data: DataDict) -> DataDict:
+        from openpi.shared.rotation import rotate6d_to_rotmat, rotmat_to_rotate6d
+
+        if "actions" not in data or "state" not in data:
+            return data
+
+        state, actions = data["state"], data["actions"]
+        state_r6d = state[..., self.r6d_start:self.r6d_start + self.r6d_dim]
+        R_current = rotate6d_to_rotmat(state_r6d, eps=self.rotation_eps)
+
+        act_r6d = actions[..., self.r6d_start:self.r6d_start + self.r6d_dim]
+        R_delta = rotate6d_to_rotmat(act_r6d, eps=self.rotation_eps)
+        # Broadcast state (…, 3, 3) to actions (…, H, 3, 3)
+        R_target = np.einsum("...ij,...jk->...ik", R_delta, np.expand_dims(R_current, axis=-3))
+        target_r6d = rotmat_to_rotate6d(R_target)
+
+        actions = actions.copy()
+        actions[..., self.r6d_start:self.r6d_start + self.r6d_dim] = target_r6d
+        data["actions"] = actions
+        return data
+
+
+@dataclasses.dataclass(frozen=True)
+class ValidateDims(DataTransformFn):
+    """Assert expected dimensions at pipeline boundaries."""
+
+    expected_state_dim: int | None = None
+    expected_action_dim: int | None = None
+
+    def __call__(self, data: DataDict) -> DataDict:
+        if self.expected_state_dim is not None and "state" in data:
+            actual = data["state"].shape[-1]
+            if actual != self.expected_state_dim:
+                raise ValueError(f"State dim mismatch: expected {self.expected_state_dim}, got {actual}")
+        if self.expected_action_dim is not None and "actions" in data:
+            actual = data["actions"].shape[-1]
+            if actual != self.expected_action_dim:
+                raise ValueError(f"Action dim mismatch: expected {self.expected_action_dim}, got {actual}")
+        return data
+
 
 @dataclasses.dataclass(frozen=True)
 class ShiftedStateToAction(DataTransformFn):

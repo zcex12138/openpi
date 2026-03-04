@@ -454,6 +454,11 @@ class LeRobotFrankaDataConfigV2(DataConfigFactory):
     # Number of translation dimensions (default 3 for xyz).
     translation_dim: int = 3
 
+    # Rotation representation: "quat" (4D quaternion) or "r6d" (6D continuous rotation).
+    rotation_representation: Literal["quat", "r6d"] = "quat"
+    rotation_eps: float = 1e-6
+    use_relative_rotation: bool = False
+
     repack_transforms: tyro.conf.Suppress[_transforms.Group] = dataclasses.field(
         default=_transforms.Group(
             inputs=[
@@ -472,9 +477,8 @@ class LeRobotFrankaDataConfigV2(DataConfigFactory):
 
     @override
     def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
-        # Build data transforms:
-        # 1. ShiftedStateToAction: convert future state to action targets
-        # 2. FrankaInputs/Outputs: robot-specific transformations
+        is_r6d = self.rotation_representation == "r6d"
+
         data_transforms = _transforms.Group(
             inputs=[
                 _transforms.ShiftedStateToAction(
@@ -490,18 +494,41 @@ class LeRobotFrankaDataConfigV2(DataConfigFactory):
                 franka_policy.FrankaInputs(
                     model_type=model_config.model_type,
                     state_dim=self.dataset_state_dim,
+                    rotation_representation=self.rotation_representation,
+                    normalize_quat_sign=not is_r6d,
                 ),
             ],
             outputs=[franka_policy.FrankaOutputs(action_dim=self.dataset_action_dim)],
         )
 
+        # Representation conversion: quat → r6d
+        if is_r6d:
+            data_transforms = data_transforms.push(
+                inputs=[_transforms.QuatToRotate6d(rotation_eps=self.rotation_eps)],
+                outputs=[_transforms.Rotate6dToQuat(rotation_eps=self.rotation_eps)],
+            )
+
+        # Internal dimensions after representation conversion
+        internal_action_dim = self.dataset_action_dim + (2 if is_r6d else 0)
+        internal_state_dim = (
+            None if self.dataset_state_dim is None
+            else self.dataset_state_dim + (2 if is_r6d else 0)
+        )
+
         if self.use_relative_translation:
             translation_delta_mask = _transforms.make_bool_mask(
-                self.translation_dim, -(self.dataset_action_dim - self.translation_dim)
+                self.translation_dim, -(internal_action_dim - self.translation_dim)
             )
             data_transforms = data_transforms.push(
                 inputs=[_transforms.DeltaActions(translation_delta_mask)],
                 outputs=[_transforms.AbsoluteActions(translation_delta_mask)],
+            )
+
+        if self.use_relative_rotation:
+            assert is_r6d, "use_relative_rotation requires rotation_representation='r6d'"
+            data_transforms = data_transforms.push(
+                inputs=[_transforms.DeltaRotate6dActions(r6d_start=self.translation_dim, rotation_eps=self.rotation_eps)],
+                outputs=[_transforms.AbsoluteRotate6dActions(r6d_start=self.translation_dim, rotation_eps=self.rotation_eps)],
             )
 
         model_transforms = ModelTransformFactory(default_prompt=self.default_prompt)(model_config)
@@ -525,6 +552,7 @@ class LeRobotFrankaTactileDataConfig(LeRobotFrankaDataConfigV2):
     """
 
     tactile_key: str = "observation.tactile.xense1_marker3d"
+    translation_scale: float = 1.0
 
     repack_transforms: tyro.conf.Suppress[_transforms.Group] = dataclasses.field(
         default=_transforms.Group(
@@ -544,6 +572,8 @@ class LeRobotFrankaTactileDataConfig(LeRobotFrankaDataConfigV2):
 
     @override
     def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+        is_r6d = self.rotation_representation == "r6d"
+
         data_transforms = _transforms.Group(
             inputs=[
                 _transforms.ShiftedStateToAction(
@@ -560,16 +590,27 @@ class LeRobotFrankaTactileDataConfig(LeRobotFrankaDataConfigV2):
                     model_type=model_config.model_type,
                     state_dim=self.dataset_state_dim,
                     tactile_key="observation/tactile",
+                    rotation_representation=self.rotation_representation,
+                    normalize_quat_sign=not is_r6d,
                 ),
             ],
             outputs=[franka_policy.FrankaOutputs(action_dim=self.dataset_action_dim)],
         )
 
+        # Representation conversion: quat → r6d
+        if is_r6d:
+            data_transforms = data_transforms.push(
+                inputs=[_transforms.QuatToRotate6d(rotation_eps=self.rotation_eps)],
+                outputs=[_transforms.Rotate6dToQuat(rotation_eps=self.rotation_eps)],
+            )
+
+        # Internal dimensions after representation conversion
+        internal_action_dim = self.dataset_action_dim + (2 if is_r6d else 0)
+
         if self.use_relative_translation:
             translation_delta_mask = _transforms.make_bool_mask(
-                self.translation_dim, -(self.dataset_action_dim - self.translation_dim)
+                self.translation_dim, -(internal_action_dim - self.translation_dim)
             )
-            # Build output transforms: scale delta actions, then convert to absolute
             output_transforms = []
             if self.translation_scale != 1.0:
                 output_transforms.append(_transforms.ScaleActions(self.translation_scale, translation_delta_mask))
@@ -578,6 +619,13 @@ class LeRobotFrankaTactileDataConfig(LeRobotFrankaDataConfigV2):
             data_transforms = data_transforms.push(
                 inputs=[_transforms.DeltaActions(translation_delta_mask)],
                 outputs=output_transforms,
+            )
+
+        if self.use_relative_rotation:
+            assert is_r6d, "use_relative_rotation requires rotation_representation='r6d'"
+            data_transforms = data_transforms.push(
+                inputs=[_transforms.DeltaRotate6dActions(r6d_start=self.translation_dim, rotation_eps=self.rotation_eps)],
+                outputs=[_transforms.AbsoluteRotate6dActions(r6d_start=self.translation_dim, rotation_eps=self.rotation_eps)],
             )
 
         model_transforms = ModelTransformFactory(default_prompt=self.default_prompt)(model_config)
@@ -1094,6 +1142,129 @@ _CONFIGS = [
             dataset_state_dim=8,
             default_prompt="open the can with the screwdriver",
             use_relative_translation=True,
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("./data/checkpoints/pi05_base/params"),
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=500,
+            peak_lr=1.5e-5,
+            decay_steps=12_000,
+            decay_lr=1.0e-6,
+        ),
+        num_train_steps=6050,
+        batch_size=64,
+        num_workers=8,
+        log_interval=100,
+        save_interval=500,
+        keep_period=2000,
+        freeze_filter=pi0_config.Pi0Config(
+            pi05=True,
+            action_dim=8,
+            action_horizon=30,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+            tactile_enabled=True,
+        ).get_freeze_filter(),
+        ema_decay=None,
+    ),
+    #
+    # Fine-tuning Franka configs with rotate6d representation.
+    #
+    TrainConfig(
+        name="pi05_franka_cola_r6d_lora",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_horizon=30,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+        ),
+        data=LeRobotFrankaDataConfigV2(
+            repo_id="2026_0130_pi05_franka_cola_lerobot_v2.0",
+            base_config=DataConfig(prompt_from_task=True),
+            dataset_action_dim=8,
+            dataset_state_dim=7,
+            default_prompt="open the can with the screwdriver",
+            rotation_representation="r6d",
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("./data/checkpoints/pi05_base/params"),
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=500,
+            peak_lr=1.5e-5,
+            decay_steps=12_000,
+            decay_lr=1.0e-6,
+        ),
+        num_train_steps=6050,
+        batch_size=64,
+        num_workers=8,
+        log_interval=100,
+        save_interval=500,
+        keep_period=2000,
+        freeze_filter=pi0_config.Pi0Config(
+            pi05=True,
+            action_dim=8,
+            action_horizon=30,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+        ).get_freeze_filter(),
+        ema_decay=None,
+    ),
+    TrainConfig(
+        name="pi05_franka_cola_relative_r6d_lora",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_horizon=30,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+        ),
+        data=LeRobotFrankaDataConfigV2(
+            repo_id="2026_0130_pi05_franka_cola_lerobot_v2.0",
+            base_config=DataConfig(prompt_from_task=True),
+            dataset_action_dim=8,
+            dataset_state_dim=8,
+            default_prompt="open the can with the screwdriver",
+            use_relative_translation=True,
+            rotation_representation="r6d",
+            use_relative_rotation=True,
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("./data/checkpoints/pi05_base/params"),
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=500,
+            peak_lr=1.5e-5,
+            decay_steps=12_000,
+            decay_lr=1.0e-6,
+        ),
+        num_train_steps=6050,
+        batch_size=64,
+        num_workers=8,
+        log_interval=100,
+        save_interval=500,
+        keep_period=2000,
+        freeze_filter=pi0_config.Pi0Config(
+            pi05=True,
+            action_dim=8,
+            action_horizon=30,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+        ).get_freeze_filter(),
+        ema_decay=None,
+    ),
+    TrainConfig(
+        name="pi05_franka_tactile_r6d_lora",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_horizon=30,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+            tactile_enabled=True,
+        ),
+        data=LeRobotFrankaTactileDataConfig(
+            repo_id="2026_0130_pi05_franka_cola_lerobot_v2.0",
+            base_config=DataConfig(prompt_from_task=True),
+            dataset_action_dim=8,
+            dataset_state_dim=8,
+            default_prompt="open the can with the screwdriver",
+            use_relative_translation=True,
+            rotation_representation="r6d",
+            use_relative_rotation=True,
         ),
         weight_loader=weight_loaders.CheckpointWeightLoader("./data/checkpoints/pi05_base/params"),
         lr_schedule=_optimizer.CosineDecaySchedule(
