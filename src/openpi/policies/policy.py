@@ -155,22 +155,15 @@ class Policy(BasePolicy):
 
         inputs = jax.tree.map(lambda x: x, obs)
         inputs = self._input_transform(inputs)
+        action_prefix = self._transform_action_prefix_for_realtime(obs, action_prefix)
 
-        # Auto-convert action_prefix if rotation representation changed (e.g. 8D quat → 10D r6d).
-        # The prefix comes from previous output (post output_transform) and may need
-        # re-conversion to match the model's internal representation.
-        prefix_transforms = [
-            t for t in self._input_transforms
-            if isinstance(t, (_transforms.QuatToRotate6d, _transforms.DeltaRotate6dActions))
-        ]
-        if prefix_transforms:
-            for t in prefix_transforms:
-                if isinstance(t, _transforms.QuatToRotate6d):
-                    # `inputs["state"]` is already transformed by `self._input_transform`.
-                    # Convert prefix actions only to avoid re-converting state.
-                    action_prefix = t({"actions": action_prefix})["actions"]
-                else:
-                    action_prefix = t({"state": inputs["state"], "actions": action_prefix})["actions"]
+        expected_action_dim = self._get_model_action_dim()
+        if expected_action_dim is not None and action_prefix.shape[-1] != expected_action_dim:
+            raise ValueError(
+                "RTC action_prefix dim mismatch after transforms: "
+                f"got {action_prefix.shape[-1]}, expected model action_dim={expected_action_dim}. "
+                "Check realtime prefix transforms against training input transforms."
+            )
 
         if self._is_pytorch_model:
             inputs = jax.tree.map(lambda x: torch.from_numpy(np.array(x)).to(self._pytorch_device)[None, ...], inputs)
@@ -205,6 +198,70 @@ class Policy(BasePolicy):
         outputs = self._output_transform(outputs)
         outputs["policy_timing"] = {"infer_ms": model_time * 1000}
         return outputs
+
+    def _transform_action_prefix_for_realtime(self, obs: dict, action_prefix: np.ndarray) -> np.ndarray:
+        """Map executed prefix actions back to the model action space.
+
+        The prefix passed by RTC comes from post-output-transform actions (e.g. 8D absolute
+        quaternion actions for Franka). To condition realtime sampling correctly, we replay the
+        action-related input transforms in the same order as training.
+        """
+        action_prefix = np.asarray(action_prefix)
+        if action_prefix.ndim != 2:
+            raise ValueError(f"action_prefix must have shape [prefix_len, action_dim], got {action_prefix.shape}")
+
+        # Build state context before Normalize/Pad so Delta transforms use the same reference
+        # space as training.
+        prefix_state = self._build_prefix_state_context(obs)
+
+        transformed = action_prefix
+        for transform in self._input_transforms:
+            if isinstance(transform, _transforms.QuatToRotate6d):
+                transformed = transform({"actions": transformed})["actions"]
+            elif isinstance(transform, (_transforms.DeltaActions, _transforms.DeltaRotate6dActions)):
+                if prefix_state is None:
+                    raise ValueError(
+                        f"{type(transform).__name__} requires `state` for realtime action_prefix transform, but no "
+                        "state was produced by input transforms."
+                    )
+                transformed = transform({"state": prefix_state, "actions": transformed})["actions"]
+            elif isinstance(transform, _transforms.Normalize):
+                transformed = transform({"actions": transformed})["actions"]
+            elif isinstance(transform, _transforms.PadStatesAndActions):
+                # PadStatesAndActions expects both state and actions; state is irrelevant for
+                # action padding but must be present.
+                state_for_pad = prefix_state
+                if state_for_pad is None:
+                    state_for_pad = np.zeros((transformed.shape[-1],), dtype=transformed.dtype)
+                transformed = transform({"state": state_for_pad, "actions": transformed})["actions"]
+            elif isinstance(transform, _transforms.ValidateDims):
+                transformed = transform({"actions": transformed})["actions"]
+
+        return np.asarray(transformed)
+
+    def _build_prefix_state_context(self, obs: dict) -> np.ndarray | None:
+        """Build state for RTC delta-prefix transforms in pre-normalized space."""
+        data = jax.tree.map(lambda x: x, obs)
+        for transform in self._input_transforms:
+            # Delta transforms should use the state before Normalize/Pad.
+            if isinstance(transform, (_transforms.Normalize, _transforms.PadStatesAndActions)):
+                break
+            data = transform(data)
+        state = data.get("state")
+        if state is None:
+            return None
+        return np.asarray(state)
+
+    def _get_model_action_dim(self) -> int | None:
+        action_dim = getattr(self._model, "action_dim", None)
+        if isinstance(action_dim, int):
+            return action_dim
+        config = getattr(self._model, "config", None)
+        if config is not None:
+            cfg_action_dim = getattr(config, "action_dim", None)
+            if isinstance(cfg_action_dim, int):
+                return cfg_action_dim
+        return None
 
     def _maybe_dump_images(self, inputs: dict) -> None:
         if not self._allow_dump_images:
