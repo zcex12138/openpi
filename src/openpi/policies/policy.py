@@ -164,10 +164,13 @@ class Policy(BasePolicy):
             if isinstance(t, (_transforms.QuatToRotate6d, _transforms.DeltaRotate6dActions))
         ]
         if prefix_transforms:
-            prefix_data = {"state": inputs["state"], "actions": action_prefix}
             for t in prefix_transforms:
-                prefix_data = t(prefix_data)
-            action_prefix = prefix_data["actions"]
+                if isinstance(t, _transforms.QuatToRotate6d):
+                    # `inputs["state"]` is already transformed by `self._input_transform`.
+                    # Convert prefix actions only to avoid re-converting state.
+                    action_prefix = t({"actions": action_prefix})["actions"]
+                else:
+                    action_prefix = t({"state": inputs["state"], "actions": action_prefix})["actions"]
 
         if self._is_pytorch_model:
             inputs = jax.tree.map(lambda x: torch.from_numpy(np.array(x)).to(self._pytorch_device)[None, ...], inputs)
