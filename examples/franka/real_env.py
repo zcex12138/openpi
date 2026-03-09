@@ -93,6 +93,11 @@ class RealEnvConfig:
     num_episodes: int = 10
     default_prompt: str = "open the can with the screwdriver"
 
+    # Policy inference defaults
+    policy_default_mode: str = "service"
+    policy_remote_host: str = "localhost"
+    policy_remote_port: int = 8000
+
     # Teaching mode (per-axis stiffness: [X, Y, Z])
     teaching_translational_stiffness: list[float] = field(default_factory=lambda: [0.0, 0.0, 0.0])
     teaching_rotational_stiffness: list[float] = field(default_factory=lambda: [0.0, 0.0, 0.0])
@@ -104,10 +109,17 @@ class RealEnvConfig:
     translation_scale: float = 1.0
     rotation_scale: float = 1.0
 
+    # Canonical execution mode selection
+    execution_mode: str | None = None
+
     # Real-Time Chunking (RTC)
     rtc_enabled: bool = False
     rtc_inference_delay: int = 3
     rtc_execute_horizon: int = 5
+
+    # CR-Dagger baseline execution
+    cr_dagger_execute_horizon: int = 10
+    cr_dagger_max_skip_steps: int = 2
 
     @property
     def workspace_bounds(self) -> tuple[np.ndarray, np.ndarray]:
@@ -163,16 +175,22 @@ class RealEnvConfig:
             max_episode_time=get_nested(cfg, ["evaluation", "max_episode_time"], 30.0),
             num_episodes=get_nested(cfg, ["evaluation", "num_episodes"], 10),
             default_prompt=get_nested(cfg, ["evaluation", "default_prompt"], "open the can with the screwdriver"),
+            policy_default_mode=get_nested(cfg, ["policy", "default_mode"], "service"),
+            policy_remote_host=get_nested(cfg, ["policy", "remote_host"], "localhost"),
+            policy_remote_port=get_nested(cfg, ["policy", "remote_port"], 8000),
             # Teaching mode (per-axis stiffness)
             teaching_translational_stiffness=get_nested(cfg, ["teaching", "translational_stiffness"], [0.0, 0.0, 0.0]),
             teaching_rotational_stiffness=get_nested(cfg, ["teaching", "rotational_stiffness"], [0.0, 0.0, 0.0]),
             teaching_load_mass=get_nested(cfg, ["teaching", "load_mass"], 0.3),
             teaching_load_com=get_nested(cfg, ["teaching", "load_com"], _default_load_com),
             teaching_load_inertia=get_nested(cfg, ["teaching", "load_inertia"], _default_load_inertia),
+            execution_mode=get_nested(cfg, ["execution", "mode"], None),
             # Real-Time Chunking (RTC)
             rtc_enabled=get_nested(cfg, ["rtc", "enabled"], False),
             rtc_inference_delay=get_nested(cfg, ["rtc", "inference_delay"], 3),
             rtc_execute_horizon=get_nested(cfg, ["rtc", "execute_horizon"], 5),
+            cr_dagger_execute_horizon=get_nested(cfg, ["cr_dagger", "execute_horizon"], 10),
+            cr_dagger_max_skip_steps=get_nested(cfg, ["cr_dagger", "max_skip_steps"], 2),
             # Motion scale
             translation_scale=get_nested(cfg, ["motion", "translation_scale"], 1.0),
             rotation_scale=get_nested(cfg, ["motion", "rotation_scale"], 1.0),

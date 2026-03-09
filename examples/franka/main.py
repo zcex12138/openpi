@@ -35,6 +35,7 @@ import time
 import numpy as np
 from openpi_client import action_chunk_broker
 from openpi_client import websocket_client_policy as _websocket_client_policy
+from openpi_client.cr_dagger_chunk_broker import CrDaggerChunkBroker, CrDaggerChunkBrokerConfig
 from openpi_client.realtime_chunk_broker import RealTimeChunkBroker, RTCConfig
 from openpi_client.runtime import runtime as _runtime
 from openpi_client.runtime.agents import policy_agent as _policy_agent
@@ -52,6 +53,27 @@ logger = logging.getLogger(__name__)
 
 # Load default config for evaluation parameter defaults
 _default_config = _real_env.RealEnvConfig.from_yaml()
+_EXECUTION_MODES = ("sync", "rtc", "cr_dagger_baseline")
+_POLICY_MODES = ("service", "local")
+
+
+@dataclasses.dataclass(frozen=True)
+class ResolvedExecutionSettings:
+    mode: str
+    control_hz: float
+    rtc_inference_delay: int
+    rtc_execute_horizon: int
+    cr_dagger_execute_horizon: int
+    cr_dagger_max_skip_steps: int
+
+
+@dataclasses.dataclass(frozen=True)
+class ResolvedPolicySettings:
+    mode: str
+    checkpoint_dir: str | None
+    config_name: str | None
+    remote_host: str | None
+    remote_port: int | None
 
 
 @dataclasses.dataclass
@@ -100,7 +122,12 @@ class Args:
     record_fps: float = 30.0
     record_queue_size: int = 256
 
-    # Real-Time Chunking (RTC) - command line overrides config file
+    # Canonical execution mode
+    execution_mode: str | None = None  # "sync" | "rtc" | "cr_dagger_baseline"
+    cr_dagger_execute_horizon: int | None = None
+    cr_dagger_max_skip_steps: int | None = None
+
+    # Real-Time Chunking (RTC) legacy shorthand - command line overrides config file
     rtc: bool = False  # Enable RTC (overrides config if True)
     rtc_inference_delay: int | None = None  # None = use config file value
     rtc_execute_horizon: int | None = None  # None = use config file value
@@ -139,6 +166,114 @@ def _create_remote_policy(host: str, port: int) -> _websocket_client_policy.Webs
     return client
 
 
+def _resolve_policy_settings(args: Args, env_config: _real_env.RealEnvConfig) -> ResolvedPolicySettings:
+    policy_mode = env_config.policy_default_mode
+    if policy_mode not in _POLICY_MODES:
+        raise ValueError(f"Unsupported policy.default_mode={policy_mode!r}. Choose from {', '.join(_POLICY_MODES)}.")
+
+    explicit_remote = args.remote_host is not None or args.remote_port is not None
+    explicit_local = args.checkpoint_dir is not None or args.config is not None
+
+    if explicit_remote and explicit_local:
+        raise ValueError("Cannot specify both local checkpoint arguments and remote service arguments")
+
+    if args.checkpoint_dir is not None:
+        if args.config is None:
+            raise ValueError("Must specify --config when using --checkpoint-dir")
+        return ResolvedPolicySettings(
+            mode="local",
+            checkpoint_dir=args.checkpoint_dir,
+            config_name=args.config,
+            remote_host=None,
+            remote_port=None,
+        )
+
+    if args.config is not None:
+        raise ValueError("--config requires --checkpoint-dir")
+
+    if explicit_remote:
+        remote_host = args.remote_host if args.remote_host is not None else env_config.policy_remote_host
+        remote_port = args.remote_port if args.remote_port is not None else env_config.policy_remote_port
+        return ResolvedPolicySettings(
+            mode="service",
+            checkpoint_dir=None,
+            config_name=None,
+            remote_host=remote_host,
+            remote_port=remote_port,
+        )
+
+    if policy_mode == "service":
+        return ResolvedPolicySettings(
+            mode="service",
+            checkpoint_dir=None,
+            config_name=None,
+            remote_host=env_config.policy_remote_host,
+            remote_port=env_config.policy_remote_port,
+        )
+
+    raise ValueError(
+        "No inference source configured. Provide --checkpoint-dir/--config, provide --remote-host, "
+        "or set policy.default_mode=service in real_env_config.yaml."
+    )
+
+
+def _resolve_execution_settings(
+    args: Args,
+    env_config: _real_env.RealEnvConfig,
+    *,
+    action_horizon: int,
+) -> ResolvedExecutionSettings:
+    explicit_mode = args.execution_mode if args.execution_mode is not None else env_config.execution_mode
+    if explicit_mode is not None and explicit_mode not in _EXECUTION_MODES:
+        raise ValueError(
+            f"Unsupported execution_mode={explicit_mode!r}. Choose from {', '.join(_EXECUTION_MODES)}."
+        )
+
+    legacy_rtc_enabled = bool(args.rtc or env_config.rtc_enabled)
+    if explicit_mode is None:
+        mode = "rtc" if legacy_rtc_enabled else "sync"
+    else:
+        if legacy_rtc_enabled and explicit_mode != "rtc":
+            raise ValueError(
+                "execution.mode conflicts with legacy RTC settings. "
+                "Disable `rtc.enabled` / `--rtc`, or select `execution_mode='rtc'`."
+            )
+        mode = explicit_mode
+
+    control_hz = args.control_fps if args.control_fps is not None else env_config.control_fps
+    rtc_inference_delay = (
+        args.rtc_inference_delay if args.rtc_inference_delay is not None else env_config.rtc_inference_delay
+    )
+    rtc_execute_horizon = (
+        args.rtc_execute_horizon if args.rtc_execute_horizon is not None else env_config.rtc_execute_horizon
+    )
+    cr_dagger_execute_horizon = (
+        args.cr_dagger_execute_horizon
+        if args.cr_dagger_execute_horizon is not None
+        else env_config.cr_dagger_execute_horizon
+    )
+    cr_dagger_max_skip_steps = (
+        args.cr_dagger_max_skip_steps
+        if args.cr_dagger_max_skip_steps is not None
+        else env_config.cr_dagger_max_skip_steps
+    )
+
+    if mode == "cr_dagger_baseline" and cr_dagger_execute_horizon > action_horizon:
+        raise ValueError(
+            "CR-Dagger execute_horizon exceeds the known model action horizon "
+            f"({cr_dagger_execute_horizon} > {action_horizon})."
+        )
+
+    return ResolvedExecutionSettings(
+        mode=mode,
+        control_hz=control_hz,
+        rtc_inference_delay=rtc_inference_delay,
+        rtc_execute_horizon=rtc_execute_horizon,
+        cr_dagger_execute_horizon=cr_dagger_execute_horizon,
+        cr_dagger_max_skip_steps=cr_dagger_max_skip_steps,
+    )
+
+
 def _run_episode(
     runtime: _runtime.Runtime,
     environment: _env.FrankaEnvironment,
@@ -175,50 +310,67 @@ def _run_episode(
 
 def main(args: Args) -> None:
     """Main evaluation function."""
-    # Validate args
-    if args.checkpoint_dir is not None and args.remote_host is not None:
-        raise ValueError("Cannot specify both checkpoint_dir and remote_host")
-    if args.checkpoint_dir is None and args.remote_host is None:
-        raise ValueError("Must specify either checkpoint_dir (local) or remote_host (remote)")
-    if args.checkpoint_dir is not None and args.config is None:
-        raise ValueError("Must specify --config when using --checkpoint-dir")
+    resolved_env_config = _real_env.RealEnvConfig.from_yaml(args.real_env_config)
+    policy_settings = _resolve_policy_settings(args, resolved_env_config)
+    logger.info(
+        "Policy mode resolved to %s (config default: %s)",
+        policy_settings.mode,
+        resolved_env_config.policy_default_mode,
+    )
 
     # Create policy
-    if args.remote_host is not None:
-        policy = _create_remote_policy(args.remote_host, args.remote_port or 8000)
+    if policy_settings.mode == "service":
+        policy = _create_remote_policy(policy_settings.remote_host or "localhost", policy_settings.remote_port or 8000)
         action_horizon = args.open_loop_horizon or 30  # Default for remote
     else:
-        policy, cfg = _create_local_policy(args.checkpoint_dir, args.config)  # type: ignore[arg-type]
+        if policy_settings.checkpoint_dir is None or policy_settings.config_name is None:
+            raise RuntimeError("Local policy settings are incomplete")
+        policy, cfg = _create_local_policy(policy_settings.checkpoint_dir, policy_settings.config_name)
         action_horizon = args.open_loop_horizon or cfg.model.action_horizon
 
-    # Create action chunk broker (standard or RTC mode)
-    # Resolve RTC parameters: command line True overrides config, else use config
-    rtc_enabled = args.rtc or _default_config.rtc_enabled
-    rtc_inference_delay = (
-        args.rtc_inference_delay if args.rtc_inference_delay is not None else _default_config.rtc_inference_delay
-    )
-    rtc_execute_horizon = (
-        args.rtc_execute_horizon if args.rtc_execute_horizon is not None else _default_config.rtc_execute_horizon
+    execution = _resolve_execution_settings(args, resolved_env_config, action_horizon=action_horizon)
+    logger.info(
+        "Execution mode resolved to %s (override with --execution-mode {%s})",
+        execution.mode,
+        ",".join(_EXECUTION_MODES),
     )
 
-    if rtc_enabled:
-        logger.info(
-            "Using Real-Time Chunking mode (inference_delay=%d, execute_horizon=%d)",
-            rtc_inference_delay,
-            rtc_execute_horizon,
-        )
+    if execution.mode == "rtc":
         rtc_config = RTCConfig(
             action_horizon=action_horizon,
-            inference_delay=rtc_inference_delay,
-            execute_horizon=rtc_execute_horizon,
-            control_hz=args.control_fps if args.control_fps else _default_config.control_fps,
+            inference_delay=execution.rtc_inference_delay,
+            execute_horizon=execution.rtc_execute_horizon,
+            control_hz=execution.control_hz,
         )
         chunked_policy = RealTimeChunkBroker(policy=policy, config=rtc_config)
+        logger.info(
+            "RTC parameters: action_horizon=%d, inference_delay=%d, execute_horizon=%d, control_hz=%.1f",
+            action_horizon,
+            execution.rtc_inference_delay,
+            execution.rtc_execute_horizon,
+            execution.control_hz,
+        )
+    elif execution.mode == "cr_dagger_baseline":
+        cr_dagger_config = CrDaggerChunkBrokerConfig(
+            action_horizon=action_horizon,
+            execute_horizon=execution.cr_dagger_execute_horizon,
+            max_skip_steps=execution.cr_dagger_max_skip_steps,
+            control_hz=execution.control_hz,
+        )
+        chunked_policy = CrDaggerChunkBroker(policy=policy, config=cr_dagger_config)
+        logger.info(
+            "CR-Dagger baseline parameters: action_horizon=%d, execute_horizon=%d, max_skip_steps=%d, control_hz=%.1f",
+            action_horizon,
+            execution.cr_dagger_execute_horizon,
+            execution.cr_dagger_max_skip_steps,
+            execution.control_hz,
+        )
     else:
         chunked_policy = action_chunk_broker.ActionChunkBroker(
             policy=policy,
             action_horizon=action_horizon,
         )
+        logger.info("Sync execution parameters: action_horizon=%d, control_hz=%.1f", action_horizon, execution.control_hz)
 
     # Create robot environment (loads from real_env_config.yaml by default)
     real_env = _real_env.FrankaRealEnv(
@@ -250,7 +402,7 @@ def main(args: Args) -> None:
     )
 
     # Get effective control fps (from args or config)
-    effective_control_fps = args.control_fps if args.control_fps is not None else _default_config.control_fps
+    effective_control_fps = execution.control_hz
 
     subscribers: list = []
     if args.record_pkl:

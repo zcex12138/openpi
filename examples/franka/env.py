@@ -60,6 +60,7 @@ class FrankaEnvironment(_environment.Environment):
         self._stale_frame_count: int = 0
         self._last_control_step_time_s: float | None = None
         self._control_hz_ema: float | None = None
+        self._latest_control_timestamp: float | None = None
         self._teaching_mode_active: bool = False
         self._keyboard_enabled: bool = sys.stdin.isatty()
         if not self._keyboard_enabled:
@@ -76,6 +77,7 @@ class FrankaEnvironment(_environment.Environment):
         self._episode_complete = False
         self._last_control_step_time_s = None
         self._control_hz_ema = None
+        self._latest_control_timestamp = None
         self._teaching_mode_active = False
         logger.info("Environment reset complete")
 
@@ -196,6 +198,7 @@ class FrankaEnvironment(_environment.Environment):
             "frames": frames,
             "marker3d": marker3d,
             "timestamp_ns": int(timestamp_ns),
+            "control_timestamp": self._latest_control_timestamp,
             "seq": int(seq),
             "tcp_pose": tcp_pose,
             "tcp_velocity": tcp_velocity,
@@ -220,10 +223,16 @@ class FrankaEnvironment(_environment.Environment):
         if actions.ndim == 2:
             actions = actions[0]
 
-        if self._episode_start_time is None:
-            self._episode_start_time = time.time()
+        action_meta = action.get("__openpi")
+        control_timestamp = time.time()
+        if isinstance(action_meta, dict) and "control_timestamp" in action_meta:
+            control_timestamp = float(action_meta["control_timestamp"])
+        self._latest_control_timestamp = control_timestamp
 
-        elapsed = time.time() - self._episode_start_time
+        if self._episode_start_time is None:
+            self._episode_start_time = control_timestamp
+
+        elapsed = control_timestamp - self._episode_start_time
 
         now_s = time.perf_counter()
         if self._last_control_step_time_s is not None:
@@ -243,8 +252,9 @@ class FrankaEnvironment(_environment.Environment):
         if chunk_meta:
             chunk_idx = chunk_meta.get("chunk_idx", "?")
             chunk_size = chunk_meta.get("chunk_size", "?")
-            new_chunk = chunk_meta.get("new_chunk", False)
+            new_chunk = chunk_meta.get("new_chunk", False) or chunk_meta.get("new_horizon", False)
             infer_started = chunk_meta.get("inference_started", False)
+            skipped_steps = chunk_meta.get("skipped_steps", 0)
             flags = []
             if new_chunk:
                 flags.append("NEW")
@@ -258,16 +268,20 @@ class FrankaEnvironment(_environment.Environment):
                 stats = chunk_meta.get("infer_stats", {})
                 mean_ms = stats.get("mean_ms", 0)
                 infer_str = f" infer={infer_ms:.0f}ms(avg={mean_ms:.0f}ms)"
+            skip_str = f" skip={skipped_steps}" if skipped_steps else ""
+            mode_str = f" mode={chunk_meta.get('mode')}" if chunk_meta.get("mode") else ""
 
             print(
-                f"[openpi] step={self._step_count} t={elapsed:.3f}s hz={hz_str} chunk={chunk_idx}/{chunk_size}{flag_str}{infer_str}",
+                "[openpi] "
+                f"step={self._step_count} t={elapsed:.3f}s hz={hz_str}{mode_str} "
+                f"chunk={chunk_idx}/{chunk_size}{skip_str}{flag_str}{infer_str}",
                 flush=True,
             )
         else:
             print(f"[openpi] step={self._step_count} t={elapsed:.3f}s hz={hz_str}", flush=True)
 
         executed_action = self._real_env.execute_action(actions)
-        action["executed_action"] = executed_action
+        action["executed_action"] = executed_action.copy()
         self._step_count += 1
 
     @property

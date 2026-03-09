@@ -75,3 +75,60 @@ timestamp SHALL 以 `frame_index / record_fps` 生成，保证单调递增。
 - **WHEN** 运行转换脚本
 - **THEN** 生成的 LeRobot 数据集 schema 与参考数据集一致
 
+---
+
+### Requirement: CR-Dagger Policy Provenance Recording
+When Franka evaluation recording is enabled in CR-Dagger baseline mode, the episode payload SHALL preserve enough policy provenance to reconstruct which cached base horizon produced each executed control step.
+
+#### Scenario: Record a new base horizon
+- **GIVEN** recording is enabled and a new CR-Dagger base horizon is inferred
+- **WHEN** the recorder persists the episode payload
+- **THEN** the payload includes a horizon-level record containing:
+  - `horizon_id`
+  - `horizon_start_timestamp` (equal to the canonical `control_timestamp` of the observation that triggered the horizon inference)
+  - `planned_timestamps`
+  - `time_base`
+  - `base_chunk`
+  - `requested_execute_horizon`
+  - `effective_horizon`
+- **AND** `planned_timestamps[0] == horizon_start_timestamp`
+
+#### Scenario: Record per-step policy lineage
+- **GIVEN** a control step is executed in CR-Dagger baseline mode
+- **WHEN** the recorder stores policy-step metadata
+- **THEN** the payload includes:
+  - `control_timestamp`
+  - `episode_step`
+  - `horizon_id`
+  - `chunk_idx`
+  - `skipped_steps`
+  - `raw_action`
+  - `executed_action`
+  - `chunk_meta`
+
+### Requirement: Shared Provenance Time Base
+CR-Dagger baseline recording SHALL use a single canonical control clock for `frames`, `policy_steps`, and `policy_horizons`.
+
+#### Scenario: Frame and policy records share the same clock
+- **GIVEN** recording is enabled in CR-Dagger baseline mode
+- **WHEN** the recorder writes the episode PKL
+- **THEN** every frame record contains `control_timestamp`
+- **AND** every policy-step record contains `control_timestamp`
+- **AND** every policy-horizon record declares the same `time_base`
+- **AND** every policy-horizon record uses the triggering observation step's `control_timestamp` as `horizon_start_timestamp`
+- **AND** the horizon `planned_timestamps` are expressed in that same time base
+
+### Requirement: Backward-Compatible Frame Recording
+CR-Dagger baseline provenance recording SHALL extend the episode PKL format without removing the existing frame-sampled hardware records.
+
+#### Scenario: Existing frame payload retained
+- **GIVEN** recording is enabled in CR-Dagger baseline mode
+- **WHEN** the recorder writes the episode PKL
+- **THEN** the existing `frames` list remains present
+- **AND** the new policy provenance data is stored alongside it rather than replacing it
+
+#### Scenario: Non-baseline mode recording
+- **GIVEN** recording is enabled but CR-Dagger baseline mode is not active
+- **WHEN** an episode PKL is written
+- **THEN** the existing frame recording behavior remains unchanged
+- **AND** any new provenance fields may be omitted or left empty

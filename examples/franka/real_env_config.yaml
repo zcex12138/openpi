@@ -69,6 +69,16 @@ evaluation:
   num_episodes: 10        # Default number of evaluation episodes
   default_prompt: "open the can with the screwdriver"  # Default task prompt
 
+# Policy inference defaults
+policy:
+  default_mode: "service"  # "service" | "local"
+  remote_host: "localhost"
+  remote_port: 8000
+
+# Canonical execution mode
+execution:
+  mode: "cr_dagger_baseline"  # "sync" | "rtc" | "cr_dagger_baseline"
+
 # Teaching mode (for human guidance)
 teaching:
   # Per-axis stiffness: [X, Y, Z] - set individual axis to 0 for full compliance
@@ -84,6 +94,11 @@ teaching:
 
 # Real-Time Chunking (RTC) parameters
 rtc:
-  enabled: true          # Enable RTC mode by default
+  enabled: false         # Keep legacy RTC flag off when canonical execution.mode is baseline
   inference_delay: 4     # Actions executed during inference
   execute_horizon: 10      # Total actions per iteration
+
+# CR-Dagger baseline parameters
+cr_dagger:
+  execute_horizon: 10
+  max_skip_steps: 2

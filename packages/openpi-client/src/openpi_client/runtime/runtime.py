@@ -1,11 +1,12 @@
 import logging
-import logging
 import threading
 import time
 
+from openpi_client import cr_dagger_chunk_broker as _cr_dagger_chunk_broker
 from openpi_client.runtime import agent as _agent
 from openpi_client.runtime import environment as _environment
 from openpi_client.runtime import subscriber as _subscriber
+
 
 class Runtime:
     """The core module orchestrating interactions between key components of the system."""
@@ -65,8 +66,8 @@ class Runtime:
 
         try:
             while self._in_episode:
-                self._step()
-                self._episode_steps += 1
+                if self._step():
+                    self._episode_steps += 1
 
                 # Sleep to maintain the desired frame rate
                 now = time.time()
@@ -85,21 +86,37 @@ class Runtime:
                 for subscriber in self._subscribers:
                     subscriber.on_episode_end()
 
-    def _step(self) -> None:
+    def _step(self) -> bool:
         """A single step of the runtime loop."""
         observation = self._environment.get_observation()
-        observation_for_agent = self._augment_observation(observation)
-        action = self._agent.get_action(observation_for_agent)
+        observation_for_agent = self._augment_observation(observation, control_timestamp=time.time())
+        try:
+            action = self._agent.get_action(observation_for_agent)
+        except _cr_dagger_chunk_broker.CrDaggerLagExceeded as exc:
+            logging.warning("CR-Dagger lag safety stop: %s", exc)
+            if hasattr(self._environment, "mark_episode_complete"):
+                self._environment.mark_episode_complete()
+            self.mark_episode_complete()
+            return False
+
+        action = dict(action)
+        action_meta = {}
+        existing_action_meta = action.get("__openpi")
+        if isinstance(existing_action_meta, dict):
+            action_meta.update(existing_action_meta)
+        action_meta.update(observation_for_agent["__openpi"])
+        action["__openpi"] = action_meta
         self._environment.apply_action(action)
         for subscriber in self._subscribers:
-            subscriber.on_step(observation, action)
+            subscriber.on_step(observation_for_agent, action)
 
         if self._environment.is_episode_complete() or (
             self._max_episode_steps > 0 and self._episode_steps >= self._max_episode_steps
         ):
             self.mark_episode_complete()
+        return True
 
-    def _augment_observation(self, observation: dict) -> dict:
+    def _augment_observation(self, observation: dict, *, control_timestamp: float) -> dict:
         """Attach episode metadata for downstream consumers (e.g., recorders)."""
         meta = {}
         existing_meta = observation.get("__openpi")
@@ -107,6 +124,7 @@ class Runtime:
             meta.update(existing_meta)
         meta["episode_index"] = self._episode_index
         meta["episode_step"] = self._episode_steps
+        meta["control_timestamp"] = float(control_timestamp)
         augmented = dict(observation)
         augmented["__openpi"] = meta
         return augmented

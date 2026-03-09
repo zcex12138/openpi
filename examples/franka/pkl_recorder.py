@@ -50,6 +50,8 @@ class EpisodePklRecorder(_subscriber.Subscriber):
         self._episode_index = self._resolve_start_index()
         self._frame_index = 0
         self._frames: list[dict[str, Any]] = []
+        self._policy_steps: list[dict[str, Any]] = []
+        self._policy_horizons: list[dict[str, Any]] = []
 
         self._queue: queue.Queue[dict[str, Any]] = queue.Queue(maxsize=config.queue_size)
         self._stop_event = threading.Event()
@@ -65,6 +67,8 @@ class EpisodePklRecorder(_subscriber.Subscriber):
         self._episode_index += 1
         self._frame_index = 0
         self._frames = []
+        self._policy_steps = []
+        self._policy_horizons = []
         self._dropped = 0
         self._last_record_time = None
         self._episode_start_ns = None
@@ -93,7 +97,61 @@ class EpisodePklRecorder(_subscriber.Subscriber):
         return max_idx
 
     def on_step(self, observation: dict, action: dict) -> None:
-        return
+        chunk_meta = action.get("__chunk_meta")
+        obs_meta = observation.get("__openpi")
+        if not isinstance(chunk_meta, dict) or not isinstance(obs_meta, dict):
+            return
+        if chunk_meta.get("mode") != "cr_dagger_baseline":
+            return
+
+        control_timestamp = float(obs_meta["control_timestamp"])
+        raw_action = np.asarray(action.get("actions", np.zeros(8, dtype=np.float32)), dtype=np.float32).reshape(-1)
+        executed_action = np.asarray(action.get("executed_action", raw_action), dtype=np.float32).reshape(-1)
+        self._policy_steps.append(
+            {
+                "control_timestamp": control_timestamp,
+                "episode_step": int(obs_meta["episode_step"]),
+                "horizon_id": int(chunk_meta["horizon_id"]),
+                "chunk_idx": int(chunk_meta["chunk_idx"]),
+                "skipped_steps": int(chunk_meta.get("skipped_steps", 0)),
+                "raw_action": raw_action.copy(),
+                "executed_action": executed_action.copy(),
+                "chunk_meta": {
+                    "mode": chunk_meta.get("mode"),
+                    "horizon_id": int(chunk_meta["horizon_id"]),
+                    "chunk_idx": int(chunk_meta["chunk_idx"]),
+                    "chunk_size": int(chunk_meta["chunk_size"]),
+                    "requested_execute_horizon": int(chunk_meta["requested_execute_horizon"]),
+                    "effective_horizon": int(chunk_meta["effective_horizon"]),
+                    "new_horizon": bool(chunk_meta.get("new_horizon", False)),
+                    "skipped_steps": int(chunk_meta.get("skipped_steps", 0)),
+                    "infer_count": int(chunk_meta.get("infer_count", 0)),
+                    "infer_ms": float(chunk_meta.get("infer_ms", 0.0)),
+                    "horizon_start_timestamp": float(chunk_meta["horizon_start_timestamp"]),
+                    "planned_timestamp": float(chunk_meta["planned_timestamp"]),
+                    "time_base": chunk_meta.get("time_base", "control_timestamp"),
+                },
+            }
+        )
+
+        horizon_meta = action.get("__horizon_meta")
+        base_chunk = action.get("__base_chunk")
+        if isinstance(horizon_meta, dict) and base_chunk is not None:
+            self._policy_horizons.append(
+                {
+                    "horizon_id": int(horizon_meta["horizon_id"]),
+                    "horizon_start_timestamp": float(horizon_meta["horizon_start_timestamp"]),
+                    "planned_timestamps": np.asarray(horizon_meta["planned_timestamps"], dtype=np.float64).copy(),
+                    "time_base": horizon_meta.get("time_base", "control_timestamp"),
+                    "base_chunk": np.asarray(base_chunk, dtype=np.float32).copy(),
+                    "requested_execute_horizon": int(horizon_meta["requested_execute_horizon"]),
+                    "effective_horizon": int(horizon_meta["effective_horizon"]),
+                    "policy_timing": {
+                        "infer_ms": float(horizon_meta.get("policy_timing", {}).get("infer_ms", 0.0)),
+                        "infer_count": int(horizon_meta.get("policy_timing", {}).get("infer_count", 0)),
+                    },
+                }
+            )
 
     def on_episode_end(self) -> None:
         self._stop_event.set()
@@ -113,6 +171,10 @@ class EpisodePklRecorder(_subscriber.Subscriber):
             "fps": float(self._config.record_fps),
             "frames": self._frames,
         }
+        if self._policy_steps:
+            payload["policy_steps"] = self._policy_steps
+        if self._policy_horizons:
+            payload["policy_horizons"] = self._policy_horizons
 
         with output_path.open("wb") as handle:
             pickle.dump(payload, handle, protocol=pickle.HIGHEST_PROTOCOL)
@@ -138,6 +200,8 @@ class EpisodePklRecorder(_subscriber.Subscriber):
             sample = self._env.get_recording_frame()
         except Exception as exc:
             logger.warning("Recorder failed to fetch frame: %s", exc)
+            return
+        if sample.get("control_timestamp") is None:
             return
 
         record = self._build_record(sample)
@@ -185,6 +249,7 @@ class EpisodePklRecorder(_subscriber.Subscriber):
         }
 
         timestamp_ns = int(sample.get("timestamp_ns", 0))
+        control_timestamp = float(sample.get("control_timestamp", 0.0))
         if timestamp_ns > 0:
             if self._episode_start_ns is None:
                 self._episode_start_ns = timestamp_ns
@@ -194,6 +259,7 @@ class EpisodePklRecorder(_subscriber.Subscriber):
         record = {
             "timestamp": timestamp,
             "timestamp_ns": timestamp_ns,
+            "control_timestamp": control_timestamp,
             "seq": int(sample.get("seq", -1)),
             "frame_index": self._frame_index,
             "images": images,

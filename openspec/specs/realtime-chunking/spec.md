@@ -4,20 +4,21 @@
 TBD - created by archiving change add-realtime-chunking. Update Purpose after archive.
 ## Requirements
 ### Requirement: Prefix-Conditioned Sampling
-系统 SHALL 支持在生成新 action chunk 时，将正在执行的动作作为前缀条件，保证时序一致性。
+系统 SHALL 支持在 rotate6d 表示下的前缀条件化采样，自动处理 action_prefix 的维度转换。
 
-#### Scenario: 生成条件化于执行前缀的新 chunk
-- **Given** 模型正在执行 prev_chunk 的前 inference_delay 个动作
-- **When** 调用 `model.realtime_sample_actions(obs, prev_chunk, inference_delay=3)`
-- **Then** 返回的 new_chunk 满足 `new_chunk[:, :3] ≈ prev_chunk[:, :3]`（前缀保持一致）
-- **And** new_chunk 的后续动作与前缀时序连贯
+#### Scenario: RTC with rotate6d action prefix auto-conversion
+- **GIVEN** 模型使用 `rotation_representation="r6d"`（内部 10D 动作）
+- **AND** broker 缓存的 action_prefix 是 8D quat 格式（经 output_transform 后）
+- **WHEN** `policy.infer_realtime(obs, action_prefix=prefix_8d)` 被调用
+- **THEN** policy 检测到 `action_prefix.shape[-1]`（8）与模型期望的动作维度（10）不匹配
+- **AND** 自动将 8D quat prefix 转换为 10D r6d prefix（通过 QuatToRotate6d）
+- **AND** 转换后的 prefix 传入模型进行条件化采样
+- **AND** 模型输出经 output_transform 转回 8D quat 返回给 broker
 
-#### Scenario: 首次推理无历史前缀
-- **Given** episode 刚开始，无 prev_chunk
-- **When** 调用 `model.realtime_sample_actions(obs, prev_chunk=None, inference_delay=0)`
-- **Then** 行为等同于标准 `sample_actions()`
-
----
+#### Scenario: RTC with quaternion representation (backward compat)
+- **GIVEN** 模型使用 `rotation_representation="quat"`（内部 8D 动作）
+- **WHEN** `policy.infer_realtime(obs, action_prefix=prefix_8d)` 被调用
+- **THEN** 行为与现有实现完全一致（无维度转换）
 
 ### Requirement: RealTimeChunkBroker Execution Scheduling
 系统 SHALL 提供 `RealTimeChunkBroker` 类，协调推理与执行的时序，实现动作队列管理和 chunk 融合。
