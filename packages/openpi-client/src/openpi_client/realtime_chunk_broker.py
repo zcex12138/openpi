@@ -22,6 +22,7 @@ class RTCConfig:
     inference_delay: int = 3  # Actions executed during inference
     execute_horizon: int = 5  # Total actions per iteration
     control_hz: float = 10.0  # Control frequency
+    use_action_prefix: bool = True  # Condition realtime inference on executed prefix
 
 
 @dataclass
@@ -82,11 +83,15 @@ class RealTimeChunkBroker(_base_policy.BasePolicy):
         # Action queue and state
         self._action_queue: deque[np.ndarray] = deque()
         self._current_chunk: np.ndarray | None = None
+        self._current_step_meta: list[dict[str, object]] = []
         self._chunk_index: int = 0
         self._last_action: np.ndarray | None = None
         self._infer_count: int = 0
         self._last_new_chunk: bool = False
         self._inference_started_this_step: bool = False
+        self._next_horizon_id: int = 0
+        self._pending_horizon_meta: dict | None = None
+        self._pending_base_chunk: np.ndarray | None = None
 
         # Threading
         self._lock = threading.Lock()
@@ -102,7 +107,7 @@ class RealTimeChunkBroker(_base_policy.BasePolicy):
 
     def _default_infer_fn(self, obs: dict, action_prefix: np.ndarray | None = None) -> dict:
         """Default inference function."""
-        if hasattr(self._policy, "infer_realtime"):
+        if self._config.use_action_prefix and hasattr(self._policy, "infer_realtime"):
             return self._policy.infer_realtime(obs, action_prefix=action_prefix)
         return self._policy.infer(obs)
 
@@ -114,14 +119,15 @@ class RealTimeChunkBroker(_base_policy.BasePolicy):
         For async operation, use start_async/get_action pattern.
         """
         self._inference_started_this_step = False
-        self._last_new_chunk = False
 
         with self._lock:
             # Check if we have actions available (limited by execute_horizon)
             effective_len = self._get_effective_chunk_len()
             if self._current_chunk is not None and self._chunk_index < effective_len:
                 chunk_idx = self._chunk_index
+                step_meta = dict(self._current_step_meta[chunk_idx])
                 action = self._current_chunk[self._chunk_index]
+                new_chunk, pending_horizon_meta, pending_base_chunk = self._pop_pending_horizon_payload()
                 self._chunk_index += 1
                 self._last_action = action.copy()
 
@@ -130,24 +136,20 @@ class RealTimeChunkBroker(_base_policy.BasePolicy):
                 if remaining <= self._config.inference_delay:
                     self._trigger_inference(obs)
 
-                return {
+                output = {
                     "actions": action,
-                    "__chunk_meta": {
-                        "chunk_idx": chunk_idx,
-                        "chunk_size": effective_len,
-                        "new_chunk": False,
-                        "infer_count": self._infer_count,
-                        "inference_started": self._inference_started_this_step,
-                        "infer_ms": self._last_infer_ms,
-                        "infer_stats": {
-                            "mean_ms": self._infer_stats.mean_infer_ms,
-                            "max_ms": self._infer_stats.max_infer_ms,
-                            "min_ms": self._infer_stats.min_infer_ms
-                            if self._infer_stats.min_infer_ms != float("inf")
-                            else 0.0,
-                        },
-                    },
+                    "__chunk_meta": self._build_chunk_meta(
+                        chunk_idx=chunk_idx,
+                        chunk_size=effective_len,
+                        new_chunk=new_chunk,
+                        inference_started=self._inference_started_this_step,
+                        step_meta=step_meta,
+                    ),
                 }
+                if new_chunk and pending_horizon_meta is not None and pending_base_chunk is not None:
+                    output["__horizon_meta"] = pending_horizon_meta
+                    output["__base_chunk"] = pending_base_chunk
+                return output
 
         # No actions available, must wait for inference
         return self._blocking_infer(obs)
@@ -156,13 +158,13 @@ class RealTimeChunkBroker(_base_policy.BasePolicy):
         """Get effective chunk length, limited by execute_horizon."""
         if self._current_chunk is None:
             return 0
-        return min(len(self._current_chunk), self._config.execute_horizon)
+        return len(self._current_chunk)
 
     def _blocking_infer(self, obs: dict) -> dict:
         """Perform blocking inference when no cached actions available."""
-        prefix = self._get_executed_prefix()
-
-        self._infer_count += 1
+        prefix = self._get_executed_prefix() if self._config.use_action_prefix else None
+        infer_count = self._register_inference()
+        control_timestamp = self._extract_control_timestamp(obs)
         start_time = time.perf_counter()
         result = self._infer_fn(obs, action_prefix=prefix)
         infer_ms = (time.perf_counter() - start_time) * 1000
@@ -174,8 +176,23 @@ class RealTimeChunkBroker(_base_policy.BasePolicy):
         if actions is None:
             raise ValueError("Inference result missing 'actions' key")
 
+        base_chunk = np.asarray(actions)
+        horizon_id = self._allocate_horizon_id()
+        horizon_meta, step_meta = self._build_horizon_payload(
+            horizon_id=horizon_id,
+            base_chunk=base_chunk,
+            control_timestamp=control_timestamp,
+            infer_ms=infer_ms,
+            infer_count=infer_count,
+            trigger_chunk_index=0,
+            frames_elapsed=0,
+            skip_count=0,
+            action_prefix_len=0 if prefix is None else len(prefix),
+        )
+
         with self._lock:
-            self._current_chunk = np.asarray(actions)
+            self._current_chunk = base_chunk[: self._config.execute_horizon].copy()
+            self._current_step_meta = step_meta[: self._config.execute_horizon]
             self._chunk_index = 0
             effective_len = self._get_effective_chunk_len()
 
@@ -183,23 +200,19 @@ class RealTimeChunkBroker(_base_policy.BasePolicy):
             action = self._current_chunk[0]
             self._chunk_index = 1
             self._last_action = action.copy()
-            self._last_new_chunk = True
+            self._last_new_chunk = False
 
         return {
             "actions": action,
-            "__chunk_meta": {
-                "chunk_idx": 0,
-                "chunk_size": effective_len,
-                "new_chunk": True,
-                "infer_count": self._infer_count,
-                "inference_started": True,
-                "infer_ms": infer_ms,
-                "infer_stats": {
-                    "mean_ms": self._infer_stats.mean_infer_ms,
-                    "max_ms": self._infer_stats.max_infer_ms,
-                    "min_ms": self._infer_stats.min_infer_ms if self._infer_stats.min_infer_ms != float("inf") else 0.0,
-                },
-            },
+            "__chunk_meta": self._build_chunk_meta(
+                chunk_idx=0,
+                chunk_size=effective_len,
+                new_chunk=True,
+                inference_started=True,
+                step_meta=self._current_step_meta[0],
+            ),
+            "__horizon_meta": horizon_meta,
+            "__base_chunk": base_chunk.copy(),
             **{k: v for k, v in result.items() if k != "actions"},
         }
 
@@ -231,7 +244,9 @@ class RealTimeChunkBroker(_base_policy.BasePolicy):
         if obs is None:
             return
 
-        prefix = self._get_executed_prefix()
+        prefix = self._get_executed_prefix() if self._config.use_action_prefix else None
+        infer_count = self._register_inference()
+        control_timestamp = self._extract_control_timestamp(obs)
         start_time = time.perf_counter()
         result = self._infer_fn(obs, action_prefix=prefix)
         infer_ms = (time.perf_counter() - start_time) * 1000
@@ -241,24 +256,74 @@ class RealTimeChunkBroker(_base_policy.BasePolicy):
         actions = result.get("actions", result.get("action"))
 
         if actions is not None:
-            self._merge_chunk(np.asarray(actions))
+            self._merge_chunk(
+                np.asarray(actions),
+                control_timestamp=control_timestamp,
+                infer_ms=infer_ms,
+                infer_count=infer_count,
+                action_prefix_len=0 if prefix is None else len(prefix),
+            )
             self._new_chunk_ready.set()
 
-    def _merge_chunk(self, new_chunk: np.ndarray) -> None:
+    def _merge_chunk(
+        self,
+        new_chunk: np.ndarray,
+        *,
+        control_timestamp: float | None,
+        infer_ms: float,
+        infer_count: int,
+        action_prefix_len: int,
+    ) -> None:
         """Merge new chunk with existing queue, respecting execute_horizon."""
+        base_chunk = np.asarray(new_chunk)
+        horizon_id = self._allocate_horizon_id()
         with self._lock:
+            frames_elapsed = 0
+            skip_count = 0
             if self._current_chunk is not None:
-                effective_len = self._get_effective_chunk_len()
-                remaining = self._current_chunk[self._chunk_index : effective_len]
+                remaining = self._current_chunk[self._chunk_index :]
+                remaining_step_meta = self._current_step_meta[self._chunk_index :]
                 frames_elapsed = self._chunk_index - self._trigger_chunk_index
-                skip_count = max(0, min(frames_elapsed, len(new_chunk) - 1))
-                new_suffix = new_chunk[skip_count:]
-                merged = np.concatenate([remaining, new_suffix], axis=0)
-                self._current_chunk = merged[: self._config.execute_horizon]
-                self._chunk_index = 0
+                skip_count = max(0, min(frames_elapsed, len(base_chunk) - 1))
             else:
-                self._current_chunk = new_chunk[: self._config.execute_horizon]
-                self._chunk_index = 0
+                remaining = np.empty((0,) + base_chunk.shape[1:], dtype=base_chunk.dtype)
+                remaining_step_meta = []
+
+            horizon_meta, step_meta = self._build_horizon_payload(
+                horizon_id=horizon_id,
+                base_chunk=base_chunk,
+                control_timestamp=control_timestamp,
+                infer_ms=infer_ms,
+                infer_count=infer_count,
+                trigger_chunk_index=self._trigger_chunk_index,
+                frames_elapsed=frames_elapsed,
+                skip_count=skip_count,
+                action_prefix_len=action_prefix_len,
+            )
+            new_suffix = base_chunk[skip_count:]
+            new_suffix_meta = step_meta[skip_count:]
+            if len(remaining) > 0:
+                merged_chunk = np.concatenate([remaining, new_suffix], axis=0)
+            else:
+                merged_chunk = new_suffix
+            merged_step_meta = remaining_step_meta + new_suffix_meta
+
+            self._current_chunk = merged_chunk[: self._config.execute_horizon].copy()
+            self._current_step_meta = merged_step_meta[: self._config.execute_horizon]
+            self._chunk_index = 0
+            self._last_new_chunk = True
+            self._pending_horizon_meta = horizon_meta
+            self._pending_base_chunk = base_chunk.copy()
+
+    def _pop_pending_horizon_payload(self) -> tuple[bool, dict | None, np.ndarray | None]:
+        new_chunk = self._last_new_chunk
+        pending_horizon_meta = self._pending_horizon_meta if new_chunk else None
+        pending_base_chunk = self._pending_base_chunk.copy() if new_chunk and self._pending_base_chunk is not None else None
+        if new_chunk:
+            self._last_new_chunk = False
+            self._pending_horizon_meta = None
+            self._pending_base_chunk = None
+        return new_chunk, pending_horizon_meta, pending_base_chunk
 
     def get_action(self, obs: dict, *, block: bool = True, timeout: float | None = None) -> np.ndarray | None:
         """Get next action for execution.
@@ -299,6 +364,7 @@ class RealTimeChunkBroker(_base_policy.BasePolicy):
         with self._lock:
             self._action_queue.clear()
             self._current_chunk = None
+            self._current_step_meta = []
             self._chunk_index = 0
             self._last_action = None
             self._pending_obs = None
@@ -309,6 +375,9 @@ class RealTimeChunkBroker(_base_policy.BasePolicy):
             self._infer_stats.reset()
             self._last_infer_ms = 0.0
             self._trigger_chunk_index = 0
+            self._next_horizon_id = 0
+            self._pending_horizon_meta = None
+            self._pending_base_chunk = None
 
         if hasattr(self._policy, "reset"):
             self._policy.reset()
@@ -330,3 +399,116 @@ class RealTimeChunkBroker(_base_policy.BasePolicy):
     @property
     def infer_stats(self) -> InferenceStats:
         return self._infer_stats
+
+    def _register_inference(self) -> int:
+        with self._lock:
+            self._infer_count += 1
+            return self._infer_count
+
+    def _extract_control_timestamp(self, obs: dict) -> float | None:
+        meta = obs.get("__openpi")
+        if isinstance(meta, dict) and "control_timestamp" in meta:
+            return float(meta["control_timestamp"])
+        return None
+
+    def _build_horizon_payload(
+        self,
+        *,
+        horizon_id: int,
+        base_chunk: np.ndarray,
+        control_timestamp: float | None,
+        infer_ms: float,
+        infer_count: int,
+        trigger_chunk_index: int,
+        frames_elapsed: int,
+        skip_count: int,
+        action_prefix_len: int,
+    ) -> tuple[dict, list[dict[str, object]]]:
+        effective_horizon = min(len(base_chunk), self._config.execute_horizon)
+        if control_timestamp is None:
+            horizon_start_timestamp = float("nan")
+            planned_timestamps = np.full((len(base_chunk),), np.nan, dtype=np.float64)
+        else:
+            horizon_start_timestamp = float(control_timestamp)
+            dt = 1.0 / self._config.control_hz
+            planned_timestamps = control_timestamp + (np.arange(len(base_chunk), dtype=np.float64) * dt)
+
+        horizon_meta = {
+            "mode": "rtc",
+            "horizon_id": int(horizon_id),
+            "horizon_start_timestamp": float(horizon_start_timestamp),
+            "planned_timestamps": planned_timestamps.copy(),
+            "time_base": "control_timestamp",
+            "base_chunk": base_chunk.copy(),
+            "requested_execute_horizon": int(self._config.execute_horizon),
+            "effective_horizon": int(effective_horizon),
+            "trigger_chunk_index": int(trigger_chunk_index),
+            "frames_elapsed": int(frames_elapsed),
+            "skip_count": int(skip_count),
+            "used_action_prefix": bool(self._config.use_action_prefix),
+            "action_prefix_len": int(action_prefix_len),
+            "policy_timing": {
+                "infer_ms": float(infer_ms),
+                "infer_count": int(infer_count),
+            },
+        }
+        step_meta = [
+            {
+                "horizon_id": int(horizon_id),
+                "source_chunk_idx": int(idx),
+                "horizon_start_timestamp": float(horizon_start_timestamp),
+                "planned_timestamp": float(planned_timestamps[idx]) if idx < len(planned_timestamps) else float("nan"),
+                "time_base": "control_timestamp",
+                "infer_count": int(infer_count),
+                "infer_ms": float(infer_ms),
+                "trigger_chunk_index": int(trigger_chunk_index),
+                "frames_elapsed": int(frames_elapsed),
+                "skip_count": int(skip_count),
+                "used_action_prefix": bool(self._config.use_action_prefix),
+                "action_prefix_len": int(action_prefix_len),
+            }
+            for idx in range(len(base_chunk))
+        ]
+        return horizon_meta, step_meta
+
+    def _build_chunk_meta(
+        self,
+        *,
+        chunk_idx: int,
+        chunk_size: int,
+        new_chunk: bool,
+        inference_started: bool,
+        step_meta: dict[str, object],
+    ) -> dict[str, object]:
+        return {
+            "mode": "rtc",
+            "horizon_id": int(step_meta["horizon_id"]),
+            "chunk_idx": int(chunk_idx),
+            "source_chunk_idx": int(step_meta["source_chunk_idx"]),
+            "chunk_size": int(chunk_size),
+            "requested_execute_horizon": int(self._config.execute_horizon),
+            "effective_horizon": int(chunk_size),
+            "new_chunk": bool(new_chunk),
+            "infer_count": int(step_meta["infer_count"]),
+            "inference_started": bool(inference_started),
+            "infer_ms": float(step_meta["infer_ms"]),
+            "infer_stats": {
+                "mean_ms": self._infer_stats.mean_infer_ms,
+                "max_ms": self._infer_stats.max_infer_ms,
+                "min_ms": self._infer_stats.min_infer_ms if self._infer_stats.min_infer_ms != float("inf") else 0.0,
+            },
+            "horizon_start_timestamp": float(step_meta["horizon_start_timestamp"]),
+            "planned_timestamp": float(step_meta["planned_timestamp"]),
+            "time_base": str(step_meta["time_base"]),
+            "trigger_chunk_index": int(step_meta["trigger_chunk_index"]),
+            "frames_elapsed": int(step_meta["frames_elapsed"]),
+            "skip_count": int(step_meta["skip_count"]),
+            "used_action_prefix": bool(step_meta["used_action_prefix"]),
+            "action_prefix_len": int(step_meta["action_prefix_len"]),
+        }
+
+    def _allocate_horizon_id(self) -> int:
+        with self._lock:
+            horizon_id = self._next_horizon_id
+            self._next_horizon_id += 1
+            return horizon_id
