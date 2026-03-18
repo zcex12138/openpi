@@ -11,12 +11,16 @@ class _DummyEnvironment:
     def __init__(self) -> None:
         self.applied_actions: list[dict] = []
         self.marked_complete = False
+        self.include_recording_snapshot = False
 
     def reset(self) -> None:
         return
 
     def get_observation(self) -> dict:
-        return {"sensor": np.array([1.0], dtype=np.float32)}
+        observation = {"sensor": np.array([1.0], dtype=np.float32)}
+        if self.include_recording_snapshot:
+            observation["__openpi"] = {"recording_snapshot": {"seq": 7, "payload": np.ones((2, 2), dtype=np.uint8)}}
+        return observation
 
     def apply_action(self, action: dict) -> None:
         self.applied_actions.append(action)
@@ -97,3 +101,18 @@ def test_runtime_handles_cr_dagger_lag_stop_without_dispatch(monkeypatch) -> Non
     assert environment.marked_complete is True
     assert runtime._in_episode is False
     assert policy.infer_calls == 1
+
+
+def test_runtime_hides_recording_snapshot_from_agent_but_keeps_it_for_subscribers(monkeypatch) -> None:
+    environment = _DummyEnvironment()
+    environment.include_recording_snapshot = True
+    agent = _CaptureAgent()
+    subscriber = _CaptureSubscriber()
+    runtime = _runtime.Runtime(environment=environment, agent=agent, subscribers=[subscriber])
+
+    monkeypatch.setattr(_runtime.time, "time", lambda: 456.789)
+
+    assert runtime._step() is True
+    assert "recording_snapshot" not in agent.observations[0]["__openpi"]
+    assert "recording_snapshot" not in environment.applied_actions[0]["__openpi"]
+    assert subscriber.steps[0][0]["__openpi"]["recording_snapshot"]["seq"] == 7

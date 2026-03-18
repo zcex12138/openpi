@@ -89,7 +89,9 @@ class Runtime:
     def _step(self) -> bool:
         """A single step of the runtime loop."""
         observation = self._environment.get_observation()
-        observation_for_agent = self._augment_observation(observation, control_timestamp=time.time())
+        control_timestamp = time.time()
+        observation_for_subscribers = self._augment_observation(observation, control_timestamp=control_timestamp)
+        observation_for_agent = self._strip_subscriber_only_metadata(observation_for_subscribers)
         try:
             action = self._agent.get_action(observation_for_agent)
         except _cr_dagger_chunk_broker.CrDaggerLagExceeded as exc:
@@ -108,7 +110,7 @@ class Runtime:
         action["__openpi"] = action_meta
         self._environment.apply_action(action)
         for subscriber in self._subscribers:
-            subscriber.on_step(observation_for_agent, action)
+            subscriber.on_step(observation_for_subscribers, action)
 
         if self._environment.is_episode_complete() or (
             self._max_episode_steps > 0 and self._episode_steps >= self._max_episode_steps
@@ -128,3 +130,16 @@ class Runtime:
         augmented = dict(observation)
         augmented["__openpi"] = meta
         return augmented
+
+    def _strip_subscriber_only_metadata(self, observation: dict) -> dict:
+        """Remove large recorder-only payloads before policy inference."""
+        meta = observation.get("__openpi")
+        if not isinstance(meta, dict) or "recording_snapshot" not in meta:
+            return observation
+
+        filtered_meta = dict(meta)
+        filtered_meta.pop("recording_snapshot", None)
+
+        filtered = dict(observation)
+        filtered["__openpi"] = filtered_meta
+        return filtered

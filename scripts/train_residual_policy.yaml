@@ -1,0 +1,26 @@
+zarr_path: /home/mpi/workspace/yhx/openpi/data/dataset/dataset_zarr/20260317_残差训练_test/replay_buffer.zarr
+checkpoint_dir: data/checkpoints/residual_policy
+exp_name: 20260317_tactile_test
+batch_size: 128
+num_epochs: 100
+lr: 0.0003
+weight_decay: 0.000001
+num_workers: 0
+device: auto
+save_every_epochs: 5
+log_every_steps: 10
+resume: false
+wandb_enabled: false
+wandb_project: residual-policy
+seed: 42
+sampling:
+  weighted_sampling: 4
+  correction_horizon: 10
+  regular_valid_sampling: all
+  num_initial_episodes: 0
+  val_ratio: 0.05
+  seed: 42
+model:
+  kind: xense_single_step_mlp
+  hidden_dims: [256, 256, 256]
+  dropout: 0.1

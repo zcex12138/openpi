@@ -16,20 +16,13 @@ TBD - created by archiving change add-franka-eval-pkl-recording. Update Purpose 
 ---
 
 ### Requirement: Recorded Frame Content
-每个录制 step SHALL 写入以下内容：
-- L500/D400/Xense1/Xense2 的 RGB 图像（uint8）
-- Xense1/Xense2 marker3d（两组 NxMx3 数组）
-- TCP pose（7D）
-- TCP 6D 速度（线速度 3D + 角速度 3D）
-- 6D 力（wrench）与 gripper 状态
-- timestamp、frame_index、episode_index
+Franka evaluation recording SHALL store canonical Franka policy actions in pose10 format while preserving the executable robot command separately.
 
-#### Scenario: Step 记录内容完整
-- **GIVEN** 相机与机器人状态可用
-- **WHEN** 录制器写入当前 step
-- **THEN** step 记录包含上述全部字段
-
----
+#### Scenario: Record canonical Franka actions
+- **GIVEN** Franka evaluation recording is enabled
+- **WHEN** a control step is recorded
+- **THEN** canonical policy-derived action fields are stored as 10D `[xyz, r1-r6, gripper]`
+- **AND** the executed robot command remains available as the 8D quaternion action sent to the robot
 
 ### Requirement: Image Downsampling
 录制图像 SHALL 以相机原始分辨率进行 2×降采样后写入 pkl，
@@ -65,46 +58,22 @@ timestamp SHALL 以 `frame_index / record_fps` 生成，保证单调递增。
 ---
 
 ### Requirement: LeRobot Conversion
-系统 SHALL 提供脚本将 pkl 录制转换为 LeRobot v2 数据集，并保持现有 key 格式：
-`observation.images.l500`、`observation.images.d400`、`observation.state`、`action`、
-`timestamp`、`frame_index`、`episode_index`、`index`、`task_index`。
-转换时 `action` SHALL 写入 8D 全零。
+The system SHALL convert Franka PKL recordings to Zarr/LeRobot-compatible datasets using pose10 canonical action fields for Franka-specific action records.
 
-#### Scenario: 转换输出兼容
-- **GIVEN** 一组 episode pkl
-- **WHEN** 运行转换脚本
-- **THEN** 生成的 LeRobot 数据集 schema 与参考数据集一致
-
----
+#### Scenario: Convert Franka PKL to Zarr with pose10 canonical actions
+- **GIVEN** a Franka PKL recording produced after this change
+- **WHEN** the Zarr conversion script runs
+- **THEN** Franka pose/action arrays used for residual-policy training are written in pose10 format
+- **AND** residual-policy consumers no longer rely on quaternion-only canonical action arrays
 
 ### Requirement: CR-Dagger Policy Provenance Recording
-When Franka evaluation recording is enabled in CR-Dagger baseline mode, the episode payload SHALL preserve enough policy provenance to reconstruct which cached base horizon produced each executed control step.
+When Franka evaluation recording is enabled in CR-Dagger baseline mode, the episode payload SHALL preserve pose10 canonical policy provenance for each control step and cached horizon.
 
-#### Scenario: Record a new base horizon
+#### Scenario: Record pose10 base horizon provenance
 - **GIVEN** recording is enabled and a new CR-Dagger base horizon is inferred
 - **WHEN** the recorder persists the episode payload
-- **THEN** the payload includes a horizon-level record containing:
-  - `horizon_id`
-  - `horizon_start_timestamp` (equal to the canonical `control_timestamp` of the observation that triggered the horizon inference)
-  - `planned_timestamps`
-  - `time_base`
-  - `base_chunk`
-  - `requested_execute_horizon`
-  - `effective_horizon`
-- **AND** `planned_timestamps[0] == horizon_start_timestamp`
-
-#### Scenario: Record per-step policy lineage
-- **GIVEN** a control step is executed in CR-Dagger baseline mode
-- **WHEN** the recorder stores policy-step metadata
-- **THEN** the payload includes:
-  - `control_timestamp`
-  - `episode_step`
-  - `horizon_id`
-  - `chunk_idx`
-  - `skipped_steps`
-  - `raw_action`
-  - `executed_action`
-  - `chunk_meta`
+- **THEN** the cached Franka base horizon is stored in pose10 format
+- **AND** per-step canonical policy action provenance is also stored in pose10 format
 
 ### Requirement: Shared Provenance Time Base
 CR-Dagger baseline recording SHALL use a single canonical control clock for `frames`, `policy_steps`, and `policy_horizons`.
@@ -132,3 +101,4 @@ CR-Dagger baseline provenance recording SHALL extend the episode PKL format with
 - **WHEN** an episode PKL is written
 - **THEN** the existing frame recording behavior remains unchanged
 - **AND** any new provenance fields may be omitted or left empty
+

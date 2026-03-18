@@ -19,18 +19,18 @@ workspace_bounds:
 # Motion limits
 motion:
   max_pos_speed: 0.2  # Maximum TCP speed (m/s)
-  translation_scale: 1.05  # Scale factor for xyz delta (>1.0 amplifies translation)
-  rotation_scale: 2.0       # Scale factor for rotation delta via slerp (>1.0 amplifies rotation)
+  translation_scale: 1.0  # Scale factor for xyz delta (>1.0 amplifies translation)
+  rotation_scale: 1.0       # Scale factor for rotation delta via slerp (>1.0 amplifies rotation)
 
 # Impedance control parameters (only used when control.mode = "impedance")
 impedance:
-  translational_stiffness: 2300.0  # Translational stiffness (N/m)
-  rotational_stiffness: 100.0       # Rotational stiffness (Nm/rad)
+  translational_stiffness: 2000.0  # Translational stiffness (N/m)
+  rotational_stiffness: 90.0       # Rotational stiffness (Nm/rad)
   exponential_decay: 0.008           # Target tracking smoothness (default 0.005, larger=faster tracking)
 
 # Cartesian control parameters (only used when control.mode = "cartesian")
 cartesian:
-  velocity_factor: 0.03  # Velocity factor for cartesian waypoint motion (0.0-1.0)
+  velocity_factor: 0.02 # Velocity factor for cartesian waypoint motion (0.0-1.0)
 
 # Action smoothing
 smoothing:
@@ -68,6 +68,7 @@ evaluation:
   max_episode_time: 200.0  # Maximum episode duration (seconds)
   num_episodes: 10        # Default number of evaluation episodes
   default_prompt: "open the can with the screwdriver"  # Default task prompt
+  record_dir: "eval_records/20260318"  # Default PKL output directory when --args.record-pkl is enabled
 
 # Policy inference defaults
 policy:
@@ -75,28 +76,35 @@ policy:
   remote_host: "localhost"
   remote_port: 8000
 
+# Residual runtime defaults (loaded by examples/franka/main.py)
+residual:
+  checkpoint_dir: null  # null=disabled; set to a residual checkpoint directory such as .../best to enable
+  scale: 0.01
+  translation_cap_m: 0.01
+  rotation_cap_rad: 0.02
+
 # Canonical execution mode
 execution:
-  mode: "cr_dagger_baseline"  # "sync" | "rtc" | "cr_dagger_baseline"
+  mode: "sync"  # "sync" | "rtc" | "cr_dagger_baseline"
 
 # Teaching mode (for human guidance)
 teaching:
   # Per-axis stiffness: [X, Y, Z] - set individual axis to 0 for full compliance
-  translational_stiffness: [1500.0, 1500.0, 1500.0]  # Translational stiffness per axis (N/m)
-  rotational_stiffness: [100.0, 100.0, 100.0]           # Rotational stiffness per axis (Nm/rad)
+  # translational_stiffness: [1500.0, 1500.0, 1500.0]  # Translational stiffness per axis (N/m)
+  # rotational_stiffness: [100.0, 100.0, 100.0]           # Rotational stiffness per axis (Nm/rad)
   # translational_stiffness: [50.0, 50.0, 50.0]  # Translational stiffness per axis (N/m)
   # rotational_stiffness: [5.0, 0.0, 20.0]           # Rotational stiffness per axis (Nm/rad)
-  # translational_stiffness: [0.0, 0.0, 0.0]  # Translational stiffness per axis (N/m)
-  # rotational_stiffness: [80.0, 0.0, 80.0]           # Rotational stiffness per axis (Nm/rad)
+  translational_stiffness: [0.0, 0.0, 0.0]  # Translational stiffness per axis (N/m)
+  rotational_stiffness: [80.0, 0.0, 80.0]           # Rotational stiffness per axis (Nm/rad)
   load_mass: 0.35                   # End-effector load mass [kg]
   load_com: [0.0, 0.0, 0.03]         # Load center of mass [m]
   load_inertia: [1.0, 0, 0, 0, 1.0, 0, 0, 0, 1.0]  # Load inertia matrix [kg·m²]
 
 # Real-Time Chunking (RTC) parameters
+# Execution is selected by execution.mode; this block only tunes RTC behavior.
 rtc:
-  enabled: false         # Keep legacy RTC flag off when canonical execution.mode is baseline
   inference_delay: 4     # Actions executed during inference
-  execute_horizon: 10      # Total actions per iteration
+  execute_horizon: 10    # Total actions per iteration
 
 # CR-Dagger baseline parameters
 cr_dagger:

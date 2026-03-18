@@ -4,7 +4,10 @@ from pathlib import Path
 import numpy as np
 import zarr
 
+from residual_policy.action_repr import pose8_to_pose10
 from residual_policy.dataset import build_cr_dagger_like_sample_indices
+from residual_policy.dataset import ResidualDataset
+from residual_policy.dataset import compute_normalization_stats
 from residual_policy.dataset import load_residual_zarr
 
 
@@ -17,10 +20,11 @@ def _create_array(group: zarr.Group, name: str, values: np.ndarray) -> None:
 
 
 def _make_pose(index: int) -> np.ndarray:
-    return np.array([0.1 * index, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, float(index % 2)], dtype=np.float32)
+    pose8 = np.array([0.1 * index, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, float(index % 2)], dtype=np.float32)
+    return pose8_to_pose10(pose8)
 
 
-def _write_test_zarr(path: Path) -> None:
+def _write_test_zarr(path: Path, *, include_xense: bool = False) -> None:
     root = zarr.group(str(path))
     data = root.create_group("data")
     meta = root.create_group("meta")
@@ -36,12 +40,16 @@ def _write_test_zarr(path: Path) -> None:
     is_human_teaching = np.zeros(num_frames, dtype=np.uint8)
     is_human_teaching[2:4] = 1
     is_human_teaching[7:10] = 1
+    xense = np.arange(num_frames * 26 * 14 * 3, dtype=np.float32).reshape(num_frames, 26, 14, 3)
+    xense[0, 0, 0, 0] = np.nan
 
     _create_array(data, "robot_tcp_pose", robot_tcp_pose)
     _create_array(data, "base_action", base_action)
     _create_array(data, "corrected_action", corrected_action)
     _create_array(data, "corrected_action_valid", corrected_action_valid)
     _create_array(data, "is_human_teaching", is_human_teaching)
+    if include_xense:
+        _create_array(data, "xense1_marker3d", xense)
     _create_array(meta, "episode_ends", np.array([6, 12], dtype=np.int64))
 
 
@@ -124,3 +132,32 @@ def test_cr_dagger_like_sampling_initial_episodes_uses_train_subset_order(tmp_pa
     assert counts[9] == 1
     assert counts[10] == 1
     assert counts[11] == 1
+
+
+def test_load_residual_zarr_requires_xense_when_requested(tmp_path: Path):
+    zarr_path = tmp_path / "dataset.zarr"
+    _write_test_zarr(zarr_path, include_xense=False)
+
+    try:
+        load_residual_zarr(zarr_path, require_xense=True)
+    except KeyError as exc:
+        assert "xense1_marker3d" in str(exc)
+    else:
+        raise AssertionError("Expected load_residual_zarr to require xense1_marker3d")
+
+
+def test_residual_dataset_xense_model_returns_marker_tensor(tmp_path: Path):
+    zarr_path = tmp_path / "dataset.zarr"
+    _write_test_zarr(zarr_path, include_xense=True)
+    data = load_residual_zarr(zarr_path, require_xense=True)
+    sample_indices = [0, 2, 7]
+    stats = compute_normalization_stats(data, sample_indices)
+    dataset = ResidualDataset(data, sample_indices, model_kind="xense_single_step_mlp", stats=stats)
+
+    sample = dataset[0]
+
+    assert set(sample) == {"low_dim_inputs", "xense", "targets"}
+    assert sample["low_dim_inputs"].shape == (20,)
+    assert sample["xense"].shape == (26, 14, 3)
+    assert sample["targets"].shape == (10,)
+    assert np.isfinite(sample["xense"].numpy()).all()

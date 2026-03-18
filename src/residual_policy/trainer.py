@@ -1,4 +1,4 @@
-"""Training loop for residual-policy MLPs."""
+"""Training loop for residual-policy models."""
 
 from __future__ import annotations
 
@@ -15,6 +15,7 @@ import safetensors.torch
 import torch
 import tqdm
 import wandb
+from torch import nn
 
 from residual_policy.config import ResidualTrainingConfig
 from residual_policy.dataset import ResidualDataset
@@ -22,7 +23,8 @@ from residual_policy.dataset import build_cr_dagger_like_sample_indices
 from residual_policy.dataset import compute_normalization_stats
 from residual_policy.dataset import load_residual_zarr
 from residual_policy.dataset import split_episode_indices
-from residual_policy.model import ResidualMLP
+from residual_policy.model import build_residual_model
+from residual_policy.model import get_model_kind_from_metadata
 
 logger = logging.getLogger(__name__)
 
@@ -55,7 +57,7 @@ def _checkpoint_dir(output_dir: Path, name: str) -> Path:
 
 def _save_checkpoint(
     checkpoint_dir: Path,
-    model: ResidualMLP,
+    model: nn.Module,
     optimizer: torch.optim.Optimizer,
     cfg: ResidualTrainingConfig,
     *,
@@ -76,6 +78,7 @@ def _save_checkpoint(
             "epoch": epoch,
             "best_val_loss": best_val_loss,
             "config": dataclasses.asdict(cfg),
+            "model_kind": cfg.model.kind,
             "action_representation": "xyz_r6d_gripper",
             "sampling_style": "cr_dagger_like",
             "weighted_sampling": cfg.sampling.weighted_sampling,
@@ -92,7 +95,7 @@ def _save_checkpoint(
 
 def _load_checkpoint(
     checkpoint_dir: Path,
-    model: ResidualMLP,
+    model: nn.Module,
     optimizer: torch.optim.Optimizer,
     device: torch.device,
 ) -> tuple[int, float | None, dict[str, np.ndarray]]:
@@ -112,7 +115,12 @@ def _stats_match(current_stats: dict[str, np.ndarray], checkpoint_stats: dict[st
 
 
 def _build_datasets(cfg: ResidualTrainingConfig) -> tuple[ResidualDataset, ResidualDataset | None, dict[str, np.ndarray]]:
-    data = load_residual_zarr(cfg.zarr_path)
+    require_xense = cfg.model.kind == "xense_single_step_mlp" and cfg.model.xense_required
+    data = load_residual_zarr(
+        cfg.zarr_path,
+        require_xense=require_xense,
+        xense_shape=cfg.model.xense_shape,
+    )
     train_episode_indices, val_episode_indices = split_episode_indices(
         data.num_episodes, cfg.sampling.val_ratio, cfg.sampling.seed
     )
@@ -133,7 +141,7 @@ def _build_datasets(cfg: ResidualTrainingConfig) -> tuple[ResidualDataset, Resid
         "target_mean": stats_obj.target_mean,
         "target_std": stats_obj.target_std,
     }
-    train_dataset = ResidualDataset(data, train_indices, stats=stats_obj)
+    train_dataset = ResidualDataset(data, train_indices, model_kind=cfg.model.kind, stats=stats_obj)
 
     if not val_episode_indices:
         return train_dataset, None, stats
@@ -149,18 +157,29 @@ def _build_datasets(cfg: ResidualTrainingConfig) -> tuple[ResidualDataset, Resid
     )
     if not val_indices:
         return train_dataset, None, stats
-    val_dataset = ResidualDataset(data, val_indices, stats=stats_obj)
+    val_dataset = ResidualDataset(data, val_indices, model_kind=cfg.model.kind, stats=stats_obj)
     return train_dataset, val_dataset, stats
 
 
-def _evaluate(model: ResidualMLP, dataloader: torch.utils.data.DataLoader, device: torch.device) -> float:
+def _forward_batch(
+    model: nn.Module,
+    batch: dict[str, torch.Tensor],
+    device: torch.device,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    targets = batch["targets"].to(device)
+    if "inputs" in batch:
+        preds = model(batch["inputs"].to(device))
+        return preds, targets
+    preds = model(batch["low_dim_inputs"].to(device), batch["xense"].to(device))
+    return preds, targets
+
+
+def _evaluate(model: nn.Module, dataloader: torch.utils.data.DataLoader, device: torch.device) -> float:
     model.eval()
     losses: list[float] = []
     with torch.no_grad():
         for batch in dataloader:
-            inputs = batch["inputs"].to(device)
-            targets = batch["targets"].to(device)
-            preds = model(inputs)
+            preds, targets = _forward_batch(model, batch, device)
             loss = torch.nn.functional.mse_loss(preds, targets)
             losses.append(float(loss.item()))
     return float(np.mean(losses)) if losses else 0.0
@@ -193,15 +212,20 @@ def train(cfg: ResidualTrainingConfig) -> Path:
             num_workers=cfg.num_workers,
         )
 
-    model = ResidualMLP(input_dim=20, output_dim=10, hidden_dims=cfg.model.hidden_dims, dropout=cfg.model.dropout).to(
-        device
-    )
+    model = build_residual_model(cfg.model, low_dim_input_dim=20, output_dim=10).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
 
     start_epoch = 0
     best_val_loss: float | None = None
     latest_dir = _checkpoint_dir(output_dir, "latest")
     if cfg.resume and latest_dir.exists():
+        resume_metadata = torch.load(latest_dir / "metadata.pt", map_location="cpu", weights_only=False)
+        checkpoint_kind = get_model_kind_from_metadata(resume_metadata)
+        if checkpoint_kind != cfg.model.kind:
+            raise ValueError(
+                "Resume checkpoint model_kind mismatch: "
+                f"checkpoint={checkpoint_kind!r}, config={cfg.model.kind!r}"
+            )
         start_epoch, best_val_loss, checkpoint_stats = _load_checkpoint(latest_dir, model, optimizer, device)
         logger.info("Resumed from epoch %d", start_epoch)
         if not _stats_match(stats, checkpoint_stats):
@@ -221,9 +245,7 @@ def train(cfg: ResidualTrainingConfig) -> Path:
         start_time = time.time()
         with tqdm.tqdm(train_loader, desc=f"Epoch {epoch + 1}/{cfg.num_epochs}") as progress:
             for batch in progress:
-                inputs = batch["inputs"].to(device)
-                targets = batch["targets"].to(device)
-                preds = model(inputs)
+                preds, targets = _forward_batch(model, batch, device)
                 loss = torch.nn.functional.mse_loss(preds, targets)
                 optimizer.zero_grad(set_to_none=True)
                 loss.backward()

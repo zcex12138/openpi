@@ -33,6 +33,7 @@ class FrameStore:
         self._marker3d: dict[str, np.ndarray] | None = None
         self._timestamp_ns: int = 0
         self._seq: int = 0
+        self._error: str | None = None
 
     def update(self, frames: dict[str, np.ndarray], marker3d: dict[str, np.ndarray]) -> None:
         now_ns = time.time_ns()
@@ -41,10 +42,15 @@ class FrameStore:
             self._marker3d = marker3d
             self._timestamp_ns = now_ns
             self._seq += 1
+            self._error = None
 
-    def get(self) -> tuple[dict[str, np.ndarray] | None, dict[str, np.ndarray] | None, int, int]:
+    def set_error(self, error: Exception | str) -> None:
         with self._lock:
-            return self._frames, self._marker3d, self._timestamp_ns, self._seq
+            self._error = str(error)
+
+    def get(self) -> tuple[dict[str, np.ndarray] | None, dict[str, np.ndarray] | None, int, int, str | None]:
+        with self._lock:
+            return self._frames, self._marker3d, self._timestamp_ns, self._seq, self._error
 
 
 def _load_provider(path: str, kwargs: dict[str, Any]) -> Any:
@@ -552,6 +558,9 @@ class _AsyncFrameReader:
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._last_warn_s = 0.0
+        self._last_success_s: float | None = None
+        self._last_failure_s: float | None = None
+        self._last_failure: str | None = None
 
     def start(self) -> None:
         if self._thread is not None:
@@ -572,6 +581,12 @@ class _AsyncFrameReader:
         with self._lock:
             if self._frame is None:
                 raise RuntimeError(f"Missing camera frame: {self._name}")
+            if self._last_failure is not None and (
+                self._last_success_s is None
+                or self._last_failure_s is None
+                or self._last_failure_s >= self._last_success_s
+            ):
+                raise RuntimeError(f"Camera {self._name} unhealthy: {self._last_failure}")
             return self._frame, self._marker3d
 
     def _run(self) -> None:
@@ -585,12 +600,19 @@ class _AsyncFrameReader:
                 frame = np.asarray(frame)
                 if not frame.flags["OWNDATA"]:
                     frame = frame.copy()
+                now_s = time.monotonic()
                 with self._lock:
                     self._frame = frame
                     self._marker3d = marker3d
+                    self._last_success_s = now_s
+                    self._last_failure_s = None
+                    self._last_failure = None
                 self._ready.set()
             except Exception as exc:
                 now_s = time.monotonic()
+                with self._lock:
+                    self._last_failure_s = now_s
+                    self._last_failure = str(exc)
                 if now_s - self._last_warn_s > 5.0:
                     logger.warning("Camera %s grab failed: %s", self._name, exc)
                     self._last_warn_s = now_s
@@ -711,16 +733,11 @@ class CameraProvider:
                 break
             frame_key = self._xense_frame_keys[idx]
             marker_key = self._xense_marker_keys[idx]
-            try:
-                rgb_frame, marker3d = reader.get()
-                if self._convert_bgr:
-                    rgb_frame = _bgr_to_rgb(rgb_frame)
-                frames[frame_key] = rgb_frame
-                markers[marker_key] = marker3d if marker3d is not None else np.zeros((0, 0, 3), dtype=np.float32)
-            except Exception as exc:
-                logger.warning("Xense camera %s failed: %s", frame_key, exc)
-                frames[frame_key] = np.zeros((0, 0, 3), dtype=np.uint8)
-                markers[marker_key] = np.zeros((0, 0, 3), dtype=np.float32)
+            rgb_frame, marker3d = reader.get()
+            if self._convert_bgr:
+                rgb_frame = _bgr_to_rgb(rgb_frame)
+            frames[frame_key] = rgb_frame
+            markers[marker_key] = marker3d if marker3d is not None else np.zeros((0, 0, 3), dtype=np.float32)
 
         return frames, markers
 
@@ -993,9 +1010,10 @@ def _poll_frames(
             if result is not None:
                 frames, marker3d = _unpack_frames_result(result)
                 store.update(frames, marker3d)
-        except Exception:
+        except Exception as exc:
             if stop_event.is_set():
                 break
+            store.set_error(exc)
             logger.exception("Camera provider get_frames failed")
         if period_s > 0:
             next_tick_s += period_s
@@ -1036,7 +1054,9 @@ class _RequestHandler(socketserver.BaseRequestHandler):
 
                 try:
                     if server.poll_hz > 0:
-                        frames, marker3d, ts_ns, seq = server.store.get()
+                        frames, marker3d, ts_ns, seq, error = server.store.get()
+                        if error is not None:
+                            raise RuntimeError(error)
                         if frames is None:
                             frames, marker3d = _unpack_frames_result(server.provider.get_frames())
                             ts_ns = time.time_ns()

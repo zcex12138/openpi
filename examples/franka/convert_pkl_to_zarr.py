@@ -4,22 +4,25 @@ PKL → Zarr 转换，输出格式兼容 convert_zarr_to_lerobot_v2.0.py。
 
 Usage:
     python examples/franka/convert_pkl_to_zarr.py \
-        --records /path/to/episode_000.pkl \
-        --output_dir /path/to/output
+        --input-dir /path/to/eval_records
 """
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 import dataclasses
 import gc
 import pickle
 import shutil
 from pathlib import Path
+import sys
 from typing import Literal
 
 import numpy as np
 import tyro
 import zarr
+from residual_policy.action_repr import pose8_to_pose10
+from residual_policy.action_repr import pose10_to_pose8
 
 try:
     from numcodecs import Blosc as _NumcodecsBlosc
@@ -31,57 +34,73 @@ try:
 except ImportError:  # pragma: no cover
     _ZarrBloscCodec = None
 
-_DEFAULT_RECORDS = "/home/mpi/workspace/yhx/openpi/demo_records/"
-_DEFAULT_RECORDS = "/home/mpi/workspace/yhx/openpi/eval_records/pi05_franka_cola_lora/20260207"
-_DEFAULT_RECORDS = "data/dataset/dataset_zarr/20260126_失败单帧"
-_DEFAULT_RECORDS = "eval_records"
+_ACTION_POSE8_DIM = 8
+_ACTION_POSE10_DIM = 10
 
+# `action_target` controls which source field is exported into `data/action`.
+# - auto: current default, same priority as `executed`, i.e. prefer the real executed command.
+# - executed: executed_action -> valid corrected_action -> base_action.
+# - base: base_action -> valid corrected_action -> executed_action.
+# - corrected: valid corrected_action -> base_action -> executed_action.
 ActionTarget = Literal["auto", "executed", "base", "corrected"]
 
 _DEFAULT_IMAGE_SHAPE = (224, 224, 3)
 _EMPTY_IMAGE = np.zeros((0, 0, 3), dtype=np.uint8)
 _EMPTY_MARKER3D = np.zeros((0, 0, 3), dtype=np.float32)
-_REQUIRED_DATA_KEYS = (
-    "timestamp",
-    "timestamp_ns",
-    "control_timestamp",
-    "seq",
-    "frame_index",
+_TRAINING_DATA_KEYS = (
     "l500_camera_img",
     "d400_camera_img",
     "robot_tcp_pose",
-    "robot_tcp_velocity",
     "robot_tcp_wrench",
     "action",
-    "executed_action",
     "base_action",
     "corrected_action",
     "corrected_action_valid",
     "is_human_teaching",
-    "teaching_segment_id",
-    "teaching_step",
 )
-_OPTIONAL_DATA_KEYS = ("xense1_camera_img", "xense1_marker3d")
+_TRAINING_OPTIONAL_DATA_KEYS = ("xense1_camera_img", "xense1_marker3d")
+_SCHEMA_VERSION = "franka_replay_buffer_v2"
 _ZARR_MAJOR_VERSION = int(str(zarr.__version__).split(".", maxsplit=1)[0])
 
 
 @dataclasses.dataclass
 class Args:
-    records: str = _DEFAULT_RECORDS
-    output_dir: str | None = None
-    temporal_downsample_ratio: int = 1
-    drop_frames_after_human_teaching: int = 0
-    action_target: ActionTarget = "auto"
+    input_dir: str
+    drop_frames_after_human_teaching: int
+    action_target: ActionTarget
 
 
-def _collect_pkl_files(records_path: Path) -> list[Path]:
-    if records_path.is_file():
-        return [records_path]
-    if records_path.is_dir():
-        candidates = sorted(records_path.glob("episode_*.pkl"))
+SCRIPT_DEFAULT_ARGS = Args(
+    # Edit these defaults directly when running the script locally.
+    input_dir="eval_records/20260318",
+    drop_frames_after_human_teaching=0,
+    action_target="auto",
+)
+
+
+def _reject_config_arg(argv: Sequence[str]) -> None:
+    for arg in argv:
+        if arg == "--config" or arg.startswith("--config="):
+            raise ValueError(
+                "--config is no longer supported for convert_pkl_to_zarr.py. "
+                "Edit SCRIPT_DEFAULT_ARGS at the top of the script or pass CLI flags directly."
+            )
+
+
+def parse_args(argv: Sequence[str] | None = None) -> Args:
+    raw_args = list(sys.argv[1:] if argv is None else argv)
+    _reject_config_arg(raw_args)
+    return tyro.cli(Args, args=raw_args, default=SCRIPT_DEFAULT_ARGS)
+
+
+def _collect_pkl_files(input_path: Path) -> list[Path]:
+    if input_path.is_file():
+        return [input_path]
+    if input_path.is_dir():
+        candidates = sorted(input_path.glob("episode_*.pkl"))
         if candidates:
             return candidates
-    raise FileNotFoundError(f"No episode_*.pkl found under {records_path}")
+    raise FileNotFoundError(f"No episode_*.pkl found under {input_path}")
 
 
 def _load_pkl(pkl_path: Path) -> dict | None:
@@ -102,6 +121,38 @@ def _vector_or_none(value: object, *, size: int) -> np.ndarray | None:
     out = np.zeros(size, dtype=np.float32)
     out[: min(size, arr.size)] = arr[:size]
     return out
+
+
+def _canonical_action_or_none(value: object, *, field_name: str) -> np.ndarray | None:
+    if value is None:
+        return None
+    arr = np.asarray(value, dtype=np.float32).reshape(-1)
+    if arr.size == 0:
+        return None
+    if arr.size == _ACTION_POSE10_DIM:
+        return arr.copy()
+    if arr.size == _ACTION_POSE8_DIM:
+        return pose8_to_pose10(arr)
+    raise ValueError(
+        f"Expected {field_name} shape ({_ACTION_POSE8_DIM},) or ({_ACTION_POSE10_DIM},), got {arr.shape}"
+    )
+
+
+def _executed_action_views_or_none(value: object) -> tuple[np.ndarray | None, np.ndarray | None]:
+    if value is None:
+        return None, None
+    arr = np.asarray(value, dtype=np.float32).reshape(-1)
+    if arr.size == 0:
+        return None, None
+    if arr.size == _ACTION_POSE8_DIM:
+        pose8 = arr.copy()
+        return pose8, pose8_to_pose10(pose8)
+    if arr.size == _ACTION_POSE10_DIM:
+        pose10 = arr.copy()
+        return pose10_to_pose8(pose10), pose10
+    raise ValueError(
+        f"Expected executed_action shape ({_ACTION_POSE8_DIM},) or ({_ACTION_POSE10_DIM},), got {arr.shape}"
+    )
 
 
 def _get_frame_images(frame: dict) -> dict:
@@ -211,6 +262,14 @@ def _select_action_target(
     corrected_action: np.ndarray | None,
     corrected_action_valid: bool,
 ) -> tuple[np.ndarray | None, bool]:
+    """Choose the canonical action exported as `data/action`.
+
+    Modes:
+    - auto: same resolution order as `executed`; prefer the real executed command.
+    - executed: executed_action -> valid corrected_action -> base_action.
+    - base: base_action -> valid corrected_action -> executed_action.
+    - corrected: valid corrected_action -> base_action -> executed_action.
+    """
     if action_target == "executed":
         candidates = (
             executed_action,
@@ -296,13 +355,13 @@ def _process_episode(episode: dict, *, action_target: ActionTarget = "auto") -> 
     control_timestamp_arr = np.zeros(n, dtype=np.float64)
     seq_arr = np.full(n, -1, dtype=np.int64)
     frame_index_arr = np.arange(n, dtype=np.int64)
-    tcp_pose_arr = np.zeros((n, 8), dtype=np.float32)
+    tcp_pose_arr = np.zeros((n, _ACTION_POSE10_DIM), dtype=np.float32)
     tcp_velocity_arr = np.zeros((n, 6), dtype=np.float32)
     tcp_wrench_arr = np.zeros((n, 6), dtype=np.float32)
-    action_arr = np.zeros((n, 8), dtype=np.float32)
-    executed_action_arr = np.zeros((n, 8), dtype=np.float32)
-    base_action_arr = np.zeros((n, 8), dtype=np.float32)
-    corrected_action_arr = np.zeros((n, 8), dtype=np.float32)
+    action_arr = np.zeros((n, _ACTION_POSE10_DIM), dtype=np.float32)
+    executed_action_arr = np.zeros((n, _ACTION_POSE8_DIM), dtype=np.float32)
+    base_action_arr = np.zeros((n, _ACTION_POSE10_DIM), dtype=np.float32)
+    corrected_action_arr = np.zeros((n, _ACTION_POSE10_DIM), dtype=np.float32)
     corrected_action_valid_arr = np.zeros(n, dtype=np.uint8)
     is_human_teaching_arr = np.zeros(n, dtype=np.uint8)
     teaching_segment_id_arr = np.full(n, -1, dtype=np.int64)
@@ -335,7 +394,7 @@ def _process_episode(episode: dict, *, action_target: ActionTarget = "auto") -> 
         frame_index_arr[i] = int(frame.get("frame_index", i))
 
         tcp_pose, gripper, wrench, tcp_velocity = _extract_state_components(frame)
-        tcp_pose_arr[i] = np.concatenate([tcp_pose, gripper], axis=0)
+        tcp_pose_arr[i] = pose8_to_pose10(np.concatenate([tcp_pose, gripper], axis=0))
         tcp_velocity_arr[i] = tcp_velocity
         tcp_wrench_arr[i] = wrench
         is_human_teaching_arr[i] = 1 if bool(frame.get("is_human_teaching", False)) else 0
@@ -344,15 +403,18 @@ def _process_episode(episode: dict, *, action_target: ActionTarget = "auto") -> 
         )
         teaching_step_arr[i] = int(frame.get("teaching_step", -1) if frame.get("teaching_step") is not None else -1)
 
-        executed_action = _vector_or_none(frame.get("action"), size=8)
-        base_action = _vector_or_none(frame.get("base_action"), size=8)
-        corrected_action = _vector_or_none(frame.get("corrected_action"), size=8)
+        executed_action, executed_action_pose10 = _executed_action_views_or_none(frame.get("executed_action"))
+        action = _canonical_action_or_none(frame.get("action"), field_name="action")
+        base_action = _canonical_action_or_none(frame.get("base_action"), field_name="base_action")
+        corrected_action = _canonical_action_or_none(frame.get("corrected_action"), field_name="corrected_action")
         corrected_action_valid = bool(frame.get("corrected_action_valid", corrected_action is not None))
         if base_action is None:
-            base_action = executed_action
+            base_action = action
 
         if executed_action is not None:
             executed_action_arr[i] = executed_action
+        if action is not None:
+            action_arr[i] = action
         if base_action is not None:
             base_action_arr[i] = base_action
         if corrected_action is not None:
@@ -362,7 +424,7 @@ def _process_episode(episode: dict, *, action_target: ActionTarget = "auto") -> 
 
         selected_action, selected_valid = _select_action_target(
             action_target=action_target,
-            executed_action=executed_action,
+            executed_action=executed_action_pose10,
             base_action=base_action,
             corrected_action=corrected_action,
             corrected_action_valid=corrected_action_valid,
@@ -420,17 +482,6 @@ def _drop_after_teaching(data: dict[str, np.ndarray], n_drop: int) -> dict[str, 
     if mask.all():
         return data
     return {k: v[mask] for k, v in data.items()}
-
-
-def _apply_downsample(data: dict[str, np.ndarray], ratio: int) -> dict[str, np.ndarray]:
-    if ratio <= 1:
-        return data
-    n = len(data["action"])
-    if n <= 2:
-        return data
-    mid_idx = np.arange(1, n - 1)[::ratio]
-    keep = np.concatenate([[0], mid_idx, [n - 1]])
-    return {k: v[keep] for k, v in data.items()}
 
 
 def _dataset_chunks(name: str, values: np.ndarray) -> tuple[int, ...]:
@@ -499,12 +550,12 @@ def _append_or_create_optional_dataset(
 
 
 def main(args: Args) -> None:
-    records_path = Path(args.records)
-    pkl_files = _collect_pkl_files(records_path)
+    input_path = Path(args.input_dir)
+    pkl_files = _collect_pkl_files(input_path)
+    required_data_keys = _TRAINING_DATA_KEYS
+    optional_data_keys = _TRAINING_OPTIONAL_DATA_KEYS
 
-    output_dir = (
-        Path(args.output_dir) if args.output_dir else records_path if records_path.is_dir() else records_path.parent
-    )
+    output_dir = input_path if input_path.is_dir() else input_path.parent
     output_dir.mkdir(parents=True, exist_ok=True)
     zarr_path = output_dir / "replay_buffer.zarr"
 
@@ -547,25 +598,22 @@ def main(args: Args) -> None:
             if dropped > 0:
                 print(f"  Dropped {dropped} frames after human_teaching")
 
-        if args.temporal_downsample_ratio > 1:
-            ep_data = _apply_downsample(ep_data, args.temporal_downsample_ratio)
-
         n_frames = len(ep_data["action"])
         if n_frames == 0:
             print("  Skipping empty episode after filtering")
             continue
 
         if not initialized:
-            for key in _REQUIRED_DATA_KEYS:
+            for key in required_data_keys:
                 _create_dataset(zarr_data, key, ep_data[key], compressor)
-            for key in _OPTIONAL_DATA_KEYS:
+            for key in optional_data_keys:
                 if key in ep_data:
                     _create_dataset(zarr_data, key, ep_data[key], compressor)
             initialized = True
         else:
-            for key in _REQUIRED_DATA_KEYS:
+            for key in required_data_keys:
                 zarr_data[key].append(ep_data[key])
-            for key in _OPTIONAL_DATA_KEYS:
+            for key in optional_data_keys:
                 _append_or_create_optional_dataset(
                     zarr_data,
                     key,
@@ -589,10 +637,11 @@ def main(args: Args) -> None:
         zarr_meta.attrs["prompts"] = prompts
         zarr_meta.attrs["fps"] = episode_fps
         zarr_meta.attrs["action_target"] = args.action_target
+        zarr_meta.attrs["schema_version"] = _SCHEMA_VERSION
 
     print(f"\nDone. Episodes: {len(episode_ends)}, Frames: {total_frames}")
     print(f"Zarr saved to: {zarr_path}")
 
 
 if __name__ == "__main__":
-    tyro.cli(main)
+    main(parse_args())

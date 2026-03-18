@@ -12,7 +12,21 @@ import urllib.parse
 import filelock
 import fsspec
 import fsspec.generic
-import tqdm_loggable.auto as tqdm
+
+
+def _is_missing_tqdm_loggable(exc: ModuleNotFoundError) -> bool:
+    if exc.name == "tqdm_loggable":
+        return True
+    message = str(exc)
+    return "No module named" in message and "'tqdm_loggable'" in message
+
+
+try:
+    import tqdm_loggable.auto as tqdm
+except ModuleNotFoundError as exc:
+    if not _is_missing_tqdm_loggable(exc):
+        raise
+    import tqdm.auto as tqdm
 
 # Environment variable to control cache directory path, ~/.cache/openpi will be used by default.
 _OPENPI_DATA_HOME = "OPENPI_DATA_HOME"
@@ -166,8 +180,8 @@ def _ensure_permissions(path: pathlib.Path) -> None:
 
 def _get_mtime(year: int, month: int, day: int) -> float:
     """Get the mtime of a given date at midnight UTC."""
-    date = datetime.datetime(year, month, day, tzinfo=datetime.UTC)
-    return time.mktime(date.timetuple())
+    date = datetime.datetime(year, month, day, tzinfo=datetime.timezone.utc)
+    return date.timestamp()
 
 
 # Map of relative paths, defined as regular expressions, to expiration timestamps (mtime format).

@@ -10,6 +10,7 @@ import torch
 from torch.utils.data import Dataset
 import zarr
 
+from residual_policy.config import ResidualModelKind
 from residual_policy.config import RegularValidSamplingMode
 from residual_policy.action_repr import build_input_features
 from residual_policy.action_repr import encode_residual_action
@@ -27,6 +28,7 @@ class ResidualNormalizationStats:
 class ResidualZarrData:
     inputs: np.ndarray
     targets: np.ndarray
+    xense_marker3d: np.ndarray | None
     is_human_teaching: np.ndarray
     corrected_action_valid: np.ndarray
     episode_ends: np.ndarray
@@ -46,7 +48,30 @@ def _load_required_array(group: zarr.Group, key: str) -> np.ndarray:
     return np.asarray(group[key][:])
 
 
-def load_residual_zarr(zarr_path: str | Path) -> ResidualZarrData:
+def _normalize_xense_marker3d(
+    value: np.ndarray,
+    *,
+    expected_shape: tuple[int, int, int],
+    num_frames: int,
+) -> np.ndarray:
+    arr = np.asarray(value, dtype=np.float32)
+    if arr.ndim != 4:
+        raise ValueError(f"Expected xense1_marker3d shape (N, H, W, 3), got {arr.shape}")
+    if arr.shape[0] != num_frames:
+        raise ValueError(
+            f"xense1_marker3d frame count mismatch: expected {num_frames}, got {arr.shape[0]}"
+        )
+    if tuple(arr.shape[1:]) != expected_shape:
+        raise ValueError(f"Expected xense1_marker3d shape (N, {expected_shape}), got {arr.shape}")
+    return np.nan_to_num(arr, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32)
+
+
+def load_residual_zarr(
+    zarr_path: str | Path,
+    *,
+    require_xense: bool = False,
+    xense_shape: tuple[int, int, int] = (26, 14, 3),
+) -> ResidualZarrData:
     root = zarr.open(str(zarr_path), mode="r")
     data_group = root["data"]
     meta_group = root["meta"]
@@ -58,14 +83,24 @@ def load_residual_zarr(zarr_path: str | Path) -> ResidualZarrData:
     is_human_teaching = _load_required_array(data_group, "is_human_teaching").astype(bool)
     episode_ends = _load_required_array(meta_group, "episode_ends").astype(np.int64)
 
-    if robot_tcp_pose.ndim != 2 or robot_tcp_pose.shape[-1] != 8:
-        raise ValueError(f"Expected robot_tcp_pose shape (N, 8), got {robot_tcp_pose.shape}")
+    if robot_tcp_pose.ndim != 2 or robot_tcp_pose.shape[-1] != 10:
+        raise ValueError(f"Expected robot_tcp_pose shape (N, 10), got {robot_tcp_pose.shape}")
     if base_action.shape != robot_tcp_pose.shape or corrected_action.shape != robot_tcp_pose.shape:
-        raise ValueError("robot_tcp_pose, base_action, and corrected_action must have identical (N, 8) shapes")
+        raise ValueError("robot_tcp_pose, base_action, and corrected_action must have identical (N, 10) shapes")
     if corrected_action_valid.shape != (robot_tcp_pose.shape[0],):
         raise ValueError("corrected_action_valid shape mismatch")
     if is_human_teaching.shape != (robot_tcp_pose.shape[0],):
         raise ValueError("is_human_teaching shape mismatch")
+
+    xense_marker3d: np.ndarray | None = None
+    if "xense1_marker3d" in data_group:
+        xense_marker3d = _normalize_xense_marker3d(
+            data_group["xense1_marker3d"][:],
+            expected_shape=xense_shape,
+            num_frames=robot_tcp_pose.shape[0],
+        )
+    elif require_xense:
+        raise KeyError("Missing required Zarr key: xense1_marker3d")
 
     inputs = build_input_features(robot_tcp_pose, base_action)
     targets = encode_residual_action(base_action, corrected_action)
@@ -73,6 +108,7 @@ def load_residual_zarr(zarr_path: str | Path) -> ResidualZarrData:
     return ResidualZarrData(
         inputs=inputs,
         targets=targets,
+        xense_marker3d=xense_marker3d,
         is_human_teaching=is_human_teaching,
         corrected_action_valid=corrected_action_valid,
         episode_ends=episode_ends,
@@ -177,13 +213,17 @@ class ResidualDataset(Dataset[dict[str, torch.Tensor]]):
         data: ResidualZarrData,
         sample_indices: list[int],
         *,
+        model_kind: ResidualModelKind = "legacy_mlp",
         stats: ResidualNormalizationStats | None = None,
     ) -> None:
         if not sample_indices:
             raise ValueError("ResidualDataset requires at least one sample index")
         self._data = data
         self.sample_indices = np.asarray(sample_indices, dtype=np.int64)
+        self._model_kind = model_kind
         self._stats = stats
+        if self._model_kind == "xense_single_step_mlp" and self._data.xense_marker3d is None:
+            raise ValueError("ResidualDataset requires xense_marker3d when model_kind='xense_single_step_mlp'")
 
     def __len__(self) -> int:
         return int(self.sample_indices.shape[0])
@@ -195,6 +235,12 @@ class ResidualDataset(Dataset[dict[str, torch.Tensor]]):
         if self._stats is not None:
             inputs = (inputs - self._stats.input_mean) / self._stats.input_std
             targets = (targets - self._stats.target_mean) / self._stats.target_std
+        if self._model_kind == "xense_single_step_mlp":
+            return {
+                "low_dim_inputs": torch.from_numpy(inputs.astype(np.float32)),
+                "xense": torch.from_numpy(self._data.xense_marker3d[sample_idx].astype(np.float32)),
+                "targets": torch.from_numpy(targets.astype(np.float32)),
+            }
         return {
             "inputs": torch.from_numpy(inputs.astype(np.float32)),
             "targets": torch.from_numpy(targets.astype(np.float32)),

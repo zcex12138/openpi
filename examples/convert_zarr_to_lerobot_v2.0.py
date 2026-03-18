@@ -128,18 +128,15 @@ def main(
         teaching_batch = is_human_teaching[start_idx:end_idx]
         marker3d_batch = xense1_marker3d[start_idx:end_idx] if has_tactile else None
 
-        # 计算每帧的有效掩码：仅在首次切换到示教模式后丢弃 N 帧
+        # 计算每帧的有效掩码：每次切换到示教模式后都丢弃后续 N 帧
         ep_len = len(d400_batch)
         valid_mask = np.ones(ep_len, dtype=bool)
         if drop_frames_after_human_teaching > 0:
-            first_teaching_idx = None
-            for i in range(ep_len):
-                if teaching_batch[i]:
-                    first_teaching_idx = i
-                    break
-            if first_teaching_idx is not None:
-                drop_end = min(first_teaching_idx + 1 + drop_frames_after_human_teaching, ep_len)
-                valid_mask[first_teaching_idx + 1 : drop_end] = False
+            teaching_bool = np.asarray(teaching_batch, dtype=bool)
+            rising_edges = np.flatnonzero(teaching_bool & ~np.concatenate([[False], teaching_bool[:-1]]))
+            for start in rising_edges:
+                drop_end = min(int(start) + 1 + drop_frames_after_human_teaching, ep_len)
+                valid_mask[int(start) + 1 : drop_end] = False
 
         total_frames += ep_len
         dropped_frames += int(np.sum(~valid_mask))

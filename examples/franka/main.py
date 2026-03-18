@@ -2,17 +2,17 @@
 
 Usage:
     # Local inference with impedance control (default)
-    uv run examples/franka/main.py --checkpoint-dir ./checkpoints/11999 --config pi05_franka_screwdriver_lora
+    uv run examples/franka/main.py --args.checkpoint-dir ./checkpoints/11999 --args.config pi05_franka_screwdriver_lora
 
     # Local inference with position control (using shifted-state-to-action config)
     uv run examples/franka/main.py \\
-        --checkpoint-dir ./checkpoints/pi05_franka_position_control_lora/11999 \\
-        --config pi05_franka_position_control_lora \\
-        --control-mode cartesian \\
-        --cartesian-velocity-factor 0.05
+        --args.checkpoint-dir ./checkpoints/pi05_franka_position_control_lora/11999 \\
+        --args.config pi05_franka_position_control_lora \\
+        --args.control-mode cartesian \\
+        --args.cartesian-velocity-factor 0.05
 
     # Remote inference (policy server mode)
-    uv run examples/franka/main.py --remote-host 0.0.0.0 --remote-port 8000
+    uv run examples/franka/main.py --args.remote-host 0.0.0.0 --args.remote-port 8000
 
 Control modes:
     - impedance: Default mode, uses impedance control with delta actions
@@ -30,9 +30,17 @@ from __future__ import annotations
 import dataclasses
 import logging
 from pathlib import Path
+import sys
 import time
 
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+for _path in (_REPO_ROOT, _REPO_ROOT / "src"):
+    _path_str = str(_path)
+    if _path_str not in sys.path:
+        sys.path.insert(0, _path_str)
+
 import numpy as np
+from openpi.serving import policy_loading as _policy_loading
 from openpi_client import action_chunk_broker
 from openpi_client import websocket_client_policy as _websocket_client_policy
 from openpi_client.cr_dagger_chunk_broker import CrDaggerChunkBroker, CrDaggerChunkBrokerConfig
@@ -46,7 +54,6 @@ from examples.franka import constants
 from examples.franka import env as _env
 from examples.franka import real_env as _real_env
 from examples.franka import pkl_recorder as _pkl_recorder
-from examples.franka import camera_visualizer as _camera_visualizer
 from examples.franka.keyboard_utils import cbreak_terminal
 
 logger = logging.getLogger(__name__)
@@ -74,6 +81,20 @@ class ResolvedPolicySettings:
     config_name: str | None
     remote_host: str | None
     remote_port: int | None
+
+
+@dataclasses.dataclass(frozen=True)
+class ResolvedResidualSettings:
+    checkpoint_dir: str | None
+    device: str
+    scale: float
+    translation_cap_m: float | None
+    rotation_cap_rad: float | None
+    gripper_cap: float | None
+
+    @property
+    def enabled(self) -> bool:
+        return self.checkpoint_dir is not None
 
 
 @dataclasses.dataclass
@@ -116,27 +137,27 @@ class Args:
     remote_host: str | None = None
     remote_port: int | None = None
 
+    # Residual policy (optional, applied after broker per control step)
+    residual_checkpoint_dir: str | None = None
+    residual_device: str = "auto"
+    residual_scale: float | None = None  # None = use config file
+    residual_translation_cap_m: float | None = None
+    residual_rotation_cap_rad: float | None = None
+    residual_gripper_cap: float | None = None
+
     # Recording (optional)
     record_pkl: bool = False
-    record_dir: str = "eval_records"
-    record_fps: float = 30.0
-    record_queue_size: int = 256
+    record_dir: str | None = None  # None = use config file value
 
     # Canonical execution mode
     execution_mode: str | None = None  # "sync" | "rtc" | "cr_dagger_baseline"
     cr_dagger_execute_horizon: int | None = None
     cr_dagger_max_skip_steps: int | None = None
 
-    # Real-Time Chunking (RTC) legacy shorthand - command line overrides config file
-    rtc: bool = False  # Enable RTC (overrides config if True)
+    # Real-Time Chunking (RTC) parameters; execution is selected by execution_mode
+    rtc: bool = False  # Legacy shorthand for execution_mode="rtc"
     rtc_inference_delay: int | None = None  # None = use config file value
     rtc_execute_horizon: int | None = None  # None = use config file value
-
-    # Visualization (optional)
-    visualize: bool = False  # Enable camera visualization during evaluation
-    visualize_keys: tuple[str, ...] = ("xense_1_rgb",)  # Camera keys to display
-    visualize_fps: float = 30.0  # Visualization refresh rate
-    visualize_scale: float = 1.0  # Window scale factor
 
 
 def _create_local_policy(checkpoint_dir: str, config_name: str) -> tuple[object, object]:
@@ -145,15 +166,8 @@ def _create_local_policy(checkpoint_dir: str, config_name: str) -> tuple[object,
     Returns:
         Tuple of (policy, train_config)
     """
-    from openpi.policies import policy_config
-    from openpi.training import config as _config
-
     logger.info("Loading policy from checkpoint: %s (config: %s)", checkpoint_dir, config_name)
-    cfg = _config.get_config(config_name)
-    policy = policy_config.create_trained_policy(
-        train_config=cfg,
-        checkpoint_dir=checkpoint_dir,
-    )
+    policy, cfg = _policy_loading.load_checkpoint_policy(checkpoint_dir, config_name)
     logger.info("Policy loaded successfully")
     return policy, cfg
 
@@ -179,7 +193,7 @@ def _resolve_policy_settings(args: Args, env_config: _real_env.RealEnvConfig) ->
 
     if args.checkpoint_dir is not None:
         if args.config is None:
-            raise ValueError("Must specify --config when using --checkpoint-dir")
+            raise ValueError("Must specify --args.config when using --args.checkpoint-dir")
         return ResolvedPolicySettings(
             mode="local",
             checkpoint_dir=args.checkpoint_dir,
@@ -189,7 +203,7 @@ def _resolve_policy_settings(args: Args, env_config: _real_env.RealEnvConfig) ->
         )
 
     if args.config is not None:
-        raise ValueError("--config requires --checkpoint-dir")
+        raise ValueError("--args.config requires --args.checkpoint-dir")
 
     if explicit_remote:
         remote_host = args.remote_host if args.remote_host is not None else env_config.policy_remote_host
@@ -212,7 +226,7 @@ def _resolve_policy_settings(args: Args, env_config: _real_env.RealEnvConfig) ->
         )
 
     raise ValueError(
-        "No inference source configured. Provide --checkpoint-dir/--config, provide --remote-host, "
+        "No inference source configured. Provide --args.checkpoint-dir/--args.config, provide --args.remote-host, "
         "or set policy.default_mode=service in real_env_config.yaml."
     )
 
@@ -229,16 +243,16 @@ def _resolve_execution_settings(
             f"Unsupported execution_mode={explicit_mode!r}. Choose from {', '.join(_EXECUTION_MODES)}."
         )
 
-    legacy_rtc_enabled = bool(args.rtc or env_config.rtc_enabled)
-    if explicit_mode is None:
-        mode = "rtc" if legacy_rtc_enabled else "sync"
-    else:
-        if legacy_rtc_enabled and explicit_mode != "rtc":
+    if explicit_mode is not None:
+        if args.rtc and explicit_mode != "rtc":
             raise ValueError(
-                "execution.mode conflicts with legacy RTC settings. "
-                "Disable `rtc.enabled` / `--rtc`, or select `execution_mode='rtc'`."
+                "execution_mode conflicts with legacy `--args.rtc` shorthand. "
+                "Disable `--args.rtc`, or select `execution_mode='rtc'`."
             )
         mode = explicit_mode
+    else:
+        legacy_rtc_enabled = bool(args.rtc or env_config.rtc_enabled)
+        mode = "rtc" if legacy_rtc_enabled else "sync"
 
     control_hz = args.control_fps if args.control_fps is not None else env_config.control_fps
     rtc_inference_delay = (
@@ -272,6 +286,96 @@ def _resolve_execution_settings(
         cr_dagger_execute_horizon=cr_dagger_execute_horizon,
         cr_dagger_max_skip_steps=cr_dagger_max_skip_steps,
     )
+
+
+def _resolve_residual_settings(args: Args, env_config: _real_env.RealEnvConfig) -> ResolvedResidualSettings:
+    residual_checkpoint_dir = (
+        args.residual_checkpoint_dir
+        if args.residual_checkpoint_dir is not None
+        else env_config.residual_checkpoint_dir
+    )
+    residual_scale = args.residual_scale if args.residual_scale is not None else env_config.residual_scale
+    residual_translation_cap_m = (
+        args.residual_translation_cap_m
+        if args.residual_translation_cap_m is not None
+        else env_config.residual_translation_cap_m
+    )
+    residual_rotation_cap_rad = (
+        args.residual_rotation_cap_rad
+        if args.residual_rotation_cap_rad is not None
+        else env_config.residual_rotation_cap_rad
+    )
+    if residual_scale < 0:
+        raise ValueError(f"residual_scale must be >= 0, got {residual_scale}")
+    if residual_translation_cap_m is not None and residual_translation_cap_m <= 0:
+        raise ValueError(f"residual_translation_cap_m must be > 0, got {residual_translation_cap_m}")
+    if residual_rotation_cap_rad is not None and residual_rotation_cap_rad <= 0:
+        raise ValueError(f"residual_rotation_cap_rad must be > 0, got {residual_rotation_cap_rad}")
+    if args.residual_gripper_cap is not None and args.residual_gripper_cap <= 0:
+        raise ValueError(f"residual_gripper_cap must be > 0, got {args.residual_gripper_cap}")
+    if residual_checkpoint_dir is not None:
+        checkpoint_path = Path(residual_checkpoint_dir).expanduser()
+        if not checkpoint_path.exists():
+            raise FileNotFoundError(f"Residual checkpoint_dir not found: {residual_checkpoint_dir}")
+        if not checkpoint_path.is_dir():
+            raise NotADirectoryError(f"Residual checkpoint_dir is not a directory: {residual_checkpoint_dir}")
+        residual_checkpoint_dir = str(checkpoint_path.resolve())
+    return ResolvedResidualSettings(
+        checkpoint_dir=residual_checkpoint_dir,
+        device=args.residual_device,
+        scale=residual_scale,
+        translation_cap_m=residual_translation_cap_m,
+        rotation_cap_rad=residual_rotation_cap_rad,
+        gripper_cap=args.residual_gripper_cap,
+    )
+
+
+def _resolve_record_dir(args: Args, env_config: _real_env.RealEnvConfig) -> Path:
+    record_dir = args.record_dir if args.record_dir is not None else env_config.record_dir
+    if not record_dir:
+        raise ValueError("record_dir must not be empty")
+    return Path(record_dir).expanduser()
+
+
+def _maybe_wrap_with_residual(policy: object, residual_settings: ResolvedResidualSettings) -> object:
+    if not residual_settings.enabled:
+        return policy
+
+    from residual_policy.inference import FrankaResidualStepPolicy
+    from residual_policy.inference import ResidualInferenceConfig
+
+    logger.info(
+        "Enabling residual policy: checkpoint=%s scale=%.3f translation_cap=%s rotation_cap=%s gripper_cap=%s device=%s apply_gripper_delta=%s",
+        residual_settings.checkpoint_dir,
+        residual_settings.scale,
+        residual_settings.translation_cap_m,
+        residual_settings.rotation_cap_rad,
+        residual_settings.gripper_cap,
+        residual_settings.device,
+        False,
+    )
+    return FrankaResidualStepPolicy(
+        policy=policy,
+        config=ResidualInferenceConfig(
+            checkpoint_dir=residual_settings.checkpoint_dir,
+            device=residual_settings.device,
+            scale=residual_settings.scale,
+            translation_cap_m=residual_settings.translation_cap_m,
+            rotation_cap_rad=residual_settings.rotation_cap_rad,
+            gripper_cap=residual_settings.gripper_cap,
+            apply_gripper_delta=False,
+        ),
+    )
+
+
+def _maybe_wrap_policy_with_pose10(policy: object, residual_settings: ResolvedResidualSettings) -> object:
+    if not residual_settings.enabled:
+        return policy
+
+    from residual_policy.inference import FrankaPolicyPose10Wrapper
+
+    logger.info("Exposing Franka base policy actions in pose10 [xyz,r6d,gripper] space before execution.")
+    return FrankaPolicyPose10Wrapper(policy)
 
 
 def _run_episode(
@@ -312,6 +416,7 @@ def main(args: Args) -> None:
     """Main evaluation function."""
     resolved_env_config = _real_env.RealEnvConfig.from_yaml(args.real_env_config)
     policy_settings = _resolve_policy_settings(args, resolved_env_config)
+    residual_settings = _resolve_residual_settings(args, resolved_env_config)
     logger.info(
         "Policy mode resolved to %s (config default: %s)",
         policy_settings.mode,
@@ -327,10 +432,11 @@ def main(args: Args) -> None:
             raise RuntimeError("Local policy settings are incomplete")
         policy, cfg = _create_local_policy(policy_settings.checkpoint_dir, policy_settings.config_name)
         action_horizon = args.open_loop_horizon or cfg.model.action_horizon
+    policy = _maybe_wrap_policy_with_pose10(policy, residual_settings)
 
     execution = _resolve_execution_settings(args, resolved_env_config, action_horizon=action_horizon)
     logger.info(
-        "Execution mode resolved to %s (override with --execution-mode {%s})",
+        "Execution mode resolved to %s (override with --args.execution-mode {%s})",
         execution.mode,
         ",".join(_EXECUTION_MODES),
     )
@@ -341,14 +447,16 @@ def main(args: Args) -> None:
             inference_delay=execution.rtc_inference_delay,
             execute_horizon=execution.rtc_execute_horizon,
             control_hz=execution.control_hz,
+            use_action_prefix=False,
         )
         chunked_policy = RealTimeChunkBroker(policy=policy, config=rtc_config)
         logger.info(
-            "RTC parameters: action_horizon=%d, inference_delay=%d, execute_horizon=%d, control_hz=%.1f",
+            "RTC parameters: action_horizon=%d, inference_delay=%d, execute_horizon=%d, control_hz=%.1f, action_prefix=%s",
             action_horizon,
             execution.rtc_inference_delay,
             execution.rtc_execute_horizon,
             execution.control_hz,
+            "off",
         )
     elif execution.mode == "cr_dagger_baseline":
         cr_dagger_config = CrDaggerChunkBrokerConfig(
@@ -371,6 +479,7 @@ def main(args: Args) -> None:
             action_horizon=action_horizon,
         )
         logger.info("Sync execution parameters: action_horizon=%d, control_hz=%.1f", action_horizon, execution.control_hz)
+    chunked_policy = _maybe_wrap_with_residual(chunked_policy, residual_settings)
 
     # Create robot environment (loads from real_env_config.yaml by default)
     real_env = _real_env.FrankaRealEnv(
@@ -406,23 +515,14 @@ def main(args: Args) -> None:
 
     subscribers: list = []
     if args.record_pkl:
+        record_dir = _resolve_record_dir(args, resolved_env_config)
+        logger.info("Recording PKL episodes to %s", record_dir)
         recorder_config = _pkl_recorder.RecorderConfig(
-            record_dir=Path(args.record_dir),
-            record_fps=args.record_fps,
-            queue_size=args.record_queue_size,
+            record_dir=record_dir,
+            control_hz=effective_control_fps,
             prompt=args.prompt,
         )
         subscribers.append(_pkl_recorder.EpisodePklRecorder(environment, recorder_config))
-    if args.visualize:
-        visualizer_config = _camera_visualizer.VisualizerConfig(
-            camera_host=args.camera_host,
-            camera_port=args.camera_port,
-            camera_timeout_s=args.camera_timeout_s,
-            display_keys=list(args.visualize_keys),
-            display_fps=args.visualize_fps,
-            window_scale=args.visualize_scale,
-        )
-        subscribers.append(_camera_visualizer.CameraVisualizer(visualizer_config))
 
     # Create runtime
     runtime = _runtime.Runtime(
@@ -438,31 +538,39 @@ def main(args: Args) -> None:
     real_env.connect()
 
     try:
-        # Verify camera connection
-        if camera.ping():
-            logger.info("Camera service connected")
-        else:
-            logger.warning("Camera service not responding, continuing without camera")
+        try:
+            # Verify camera connection
+            if camera.ping():
+                logger.info("Camera service connected")
+            else:
+                reason = "Camera service not responding before evaluation start"
+                real_env.safety_stop_control(reason)
+                raise _env.CameraSafetyStop(reason)
 
-        # Run evaluation episodes
-        results = []
-        for episode_idx in range(args.num_episodes):
-            try:
-                result = _run_episode(runtime, environment, episode_idx)
-                results.append(result)
-            except KeyboardInterrupt:
-                logger.info("Evaluation interrupted by user")
-                break
+            # Run evaluation episodes
+            results = []
+            for episode_idx in range(args.num_episodes):
+                try:
+                    result = _run_episode(runtime, environment, episode_idx)
+                    results.append(result)
+                except _env.CameraSafetyStop as exc:
+                    logger.error("Evaluation stopped by camera safety stop: %s", exc)
+                    break
+                except KeyboardInterrupt:
+                    logger.info("Evaluation interrupted by user")
+                    break
 
-        # Print summary
-        if results:
-            avg_steps = np.mean([r["steps"] for r in results])
-            avg_time = np.mean([r["elapsed_time"] for r in results])
-            logger.info("=" * 50)
-            logger.info("Evaluation complete: %d episodes", len(results))
-            logger.info("Average steps: %.1f", avg_steps)
-            logger.info("Average time: %.1fs", avg_time)
-            logger.info("=" * 50)
+            # Print summary
+            if results:
+                avg_steps = np.mean([r["steps"] for r in results])
+                avg_time = np.mean([r["elapsed_time"] for r in results])
+                logger.info("=" * 50)
+                logger.info("Evaluation complete: %d episodes", len(results))
+                logger.info("Average steps: %.1f", avg_steps)
+                logger.info("Average time: %.1fs", avg_time)
+                logger.info("=" * 50)
+        except _env.CameraSafetyStop as exc:
+            logger.error("Evaluation aborted by camera safety stop: %s", exc)
 
     finally:
         real_env.disconnect()

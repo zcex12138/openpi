@@ -10,16 +10,6 @@ from openpi.shared.rotation import rotate6d_to_rotmat
 from openpi.shared.rotation import rotmat_to_rotate6d
 
 
-def as_pose10(pose: np.ndarray) -> np.ndarray:
-    """Convert pose to [xyz, r6d, gripper], accepting pose8 or pose10."""
-    arr = np.asarray(pose, dtype=np.float32)
-    if arr.shape[-1] == 10:
-        return arr.copy()
-    if arr.shape[-1] == 8:
-        return pose8_to_pose10(arr)
-    raise ValueError(f"Expected pose last dim 8 or 10, got {arr.shape}")
-
-
 def canonicalize_quaternion_sign(quat: np.ndarray) -> np.ndarray:
     """Flip quaternion sign so the dominant component is always positive."""
     arr = np.asarray(quat)
@@ -54,17 +44,25 @@ def pose10_to_pose8(pose10: np.ndarray) -> np.ndarray:
     return np.concatenate([xyz, quat, gripper], axis=-1).astype(np.float32)
 
 
-def build_input_features(state_pose8: np.ndarray, base_action8: np.ndarray) -> np.ndarray:
-    """Build model inputs from current state and base action."""
-    state10 = as_pose10(state_pose8)
-    base10 = as_pose10(base_action8)
-    return np.concatenate([state10, base10], axis=-1).astype(np.float32)
+def build_input_features(state_pose10: np.ndarray, base_action_pose10: np.ndarray) -> np.ndarray:
+    """Build residual-model inputs from canonical pose10 state and base action."""
+    state = np.asarray(state_pose10, dtype=np.float32)
+    base_action = np.asarray(base_action_pose10, dtype=np.float32)
+    if state.shape[-1] != 10:
+        raise ValueError(f"Expected state pose10 last dim 10, got {state.shape}")
+    if base_action.shape[-1] != 10:
+        raise ValueError(f"Expected base action pose10 last dim 10, got {base_action.shape}")
+    return np.concatenate([state, base_action], axis=-1).astype(np.float32)
 
 
-def encode_residual_action(base_action8: np.ndarray, corrected_action8: np.ndarray) -> np.ndarray:
-    """Encode corrected_action relative to base_action in xyz+r6d+gripper space."""
-    base10 = pose8_to_pose10(base_action8)
-    corrected10 = pose8_to_pose10(corrected_action8)
+def encode_residual_action(base_action_pose10: np.ndarray, corrected_action_pose10: np.ndarray) -> np.ndarray:
+    """Encode corrected_action relative to base_action in canonical pose10 space."""
+    base10 = np.asarray(base_action_pose10, dtype=np.float32)
+    corrected10 = np.asarray(corrected_action_pose10, dtype=np.float32)
+    if base10.shape[-1] != 10:
+        raise ValueError(f"Expected base action pose10 last dim 10, got {base10.shape}")
+    if corrected10.shape[-1] != 10:
+        raise ValueError(f"Expected corrected action pose10 last dim 10, got {corrected10.shape}")
 
     delta_xyz = corrected10[..., :3] - base10[..., :3]
     base_rot = rotate6d_to_rotmat(base10[..., 3:9])
@@ -75,9 +73,11 @@ def encode_residual_action(base_action8: np.ndarray, corrected_action8: np.ndarr
     return np.concatenate([delta_xyz, delta_r6d, delta_gripper], axis=-1).astype(np.float32)
 
 
-def decode_residual_pose10(base_action8: np.ndarray, residual10: np.ndarray) -> np.ndarray:
+def decode_residual_pose10(base_action_pose10: np.ndarray, residual10: np.ndarray) -> np.ndarray:
     """Decode residual target back to an absolute [xyz, r6d, gripper] pose."""
-    base10 = as_pose10(base_action8)
+    base10 = np.asarray(base_action_pose10, dtype=np.float32)
+    if base10.shape[-1] != 10:
+        raise ValueError(f"Expected base action pose10 last dim 10, got {base10.shape}")
     residual = np.asarray(residual10, dtype=np.float32)
     if residual.shape[-1] != 10:
         raise ValueError(f"Expected residual last dim 10, got {residual.shape}")
@@ -89,8 +89,3 @@ def decode_residual_pose10(base_action8: np.ndarray, residual10: np.ndarray) -> 
     target_r6d = rotmat_to_rotate6d(target_rot)
     target_gripper = base10[..., 9:10] + residual[..., 9:10]
     return np.concatenate([target_xyz, target_r6d, target_gripper], axis=-1).astype(np.float32)
-
-
-def decode_residual_action(base_action8: np.ndarray, residual10: np.ndarray) -> np.ndarray:
-    """Decode residual target back to an absolute [xyz, quat, gripper] action."""
-    return pose10_to_pose8(decode_residual_pose10(base_action8, residual10))

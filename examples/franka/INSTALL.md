@@ -15,3 +15,6 @@ uv pip install -e .
 # openpi-client
 uv pip install -e packages/openpi-client
 uv pip install tyro
+
+# residual runtime (required when residual.checkpoint_dir is enabled)
+uv pip install safetensors

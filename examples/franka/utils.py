@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-import yaml
+from openpi.shared.yaml_config import load_yaml_mapping
 
 # Numerical constants
 QUATERNION_NORM_EPSILON: float = 1e-9
@@ -82,13 +82,4 @@ def get_nested(cfg: dict[str, Any], keys: list[str], default: Any) -> Any:
 
 def load_yaml_config(path: str | Path) -> dict[str, Any]:
     """Load YAML config file, raising if missing or invalid."""
-    config_path = Path(path)
-    if not config_path.exists():
-        raise FileNotFoundError(f"Config file not found: {config_path}")
-    with config_path.open("r", encoding="utf-8") as handle:
-        data = yaml.safe_load(handle)
-    if data is None:
-        return {}
-    if not isinstance(data, dict):
-        raise ValueError("Config file must contain a YAML mapping at the top level")
-    return data
+    return load_yaml_mapping(path)

@@ -202,9 +202,9 @@ class Policy(BasePolicy):
     def _transform_action_prefix_for_realtime(self, obs: dict, action_prefix: np.ndarray) -> np.ndarray:
         """Map executed prefix actions back to the model action space.
 
-        The prefix passed by RTC comes from post-output-transform actions (e.g. 8D absolute
-        quaternion actions for Franka). To condition realtime sampling correctly, we replay the
-        action-related input transforms in the same order as training.
+        The prefix passed by RTC comes from post-output-transform actions. To condition realtime
+        sampling correctly, we replay the action-related input transforms in the same order as
+        training while avoiding duplicate representation conversion for already-canonical prefixes.
         """
         action_prefix = np.asarray(action_prefix)
         if action_prefix.ndim != 2:
@@ -217,6 +217,8 @@ class Policy(BasePolicy):
         transformed = action_prefix
         for transform in self._input_transforms:
             if isinstance(transform, _transforms.QuatToRotate6d):
+                if transformed.shape[-1] == 10:
+                    continue
                 transformed = transform({"actions": transformed})["actions"]
             elif isinstance(transform, (_transforms.DeltaActions, _transforms.DeltaRotate6dActions)):
                 if prefix_state is None:

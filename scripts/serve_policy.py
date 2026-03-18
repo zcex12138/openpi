@@ -2,18 +2,12 @@ import dataclasses
 import enum
 import logging
 import socket
-import time
 
+from openpi.serving import policy_loading as _policy_loading
 import tyro
 
-from openpi.policies import aloha_policy
-from openpi.policies import droid_policy
-from openpi.policies import franka_policy
-from openpi.policies import libero_policy
 from openpi.policies import policy as _policy
-from openpi.policies import policy_config as _policy_config
 from openpi.serving import websocket_policy_server
-from openpi.training import config as _config
 
 
 class EnvMode(enum.Enum):
@@ -84,9 +78,12 @@ DEFAULT_CHECKPOINT: dict[EnvMode, Checkpoint] = {
 def create_default_policy(env: EnvMode, *, default_prompt: str | None = None) -> _policy.Policy:
     """Create a default policy for the given environment."""
     if checkpoint := DEFAULT_CHECKPOINT.get(env):
-        return _policy_config.create_trained_policy(
-            _config.get_config(checkpoint.config), checkpoint.dir, default_prompt=default_prompt
+        policy, _ = _policy_loading.load_checkpoint_policy(
+            checkpoint.dir,
+            checkpoint.config,
+            default_prompt=default_prompt,
         )
+        return policy
     raise ValueError(f"Unsupported environment mode: {env}")
 
 
@@ -94,34 +91,14 @@ def create_policy(args: Args) -> _policy.Policy:
     """Create a policy from the given arguments."""
     match args.policy:
         case Checkpoint():
-            return _policy_config.create_trained_policy(
-                _config.get_config(args.policy.config), args.policy.dir, default_prompt=args.default_prompt
+            policy, _ = _policy_loading.load_checkpoint_policy(
+                args.policy.dir,
+                args.policy.config,
+                default_prompt=args.default_prompt,
             )
+            return policy
         case Default():
             return create_default_policy(args.env, default_prompt=args.default_prompt)
-
-
-def _make_dummy_observation(config_name: str) -> dict:
-    """Create a dummy observation for JIT warmup based on config name."""
-    if "aloha" in config_name:
-        return aloha_policy.make_aloha_example()
-    if "droid" in config_name:
-        return droid_policy.make_droid_example()
-    if "libero" in config_name:
-        return libero_policy.make_libero_example()
-    if "franka" in config_name:
-        return franka_policy.make_franka_example()
-    return franka_policy.make_franka_example()
-
-
-def _warmup_policy(policy: _policy.BasePolicy, config_name: str) -> None:
-    """Run a dummy inference to trigger JAX JIT compilation before serving."""
-    logging.info("Warming up policy (JIT compilation)...")
-    dummy_obs = _make_dummy_observation(config_name)
-    start = time.monotonic()
-    policy.infer(dummy_obs)
-    elapsed = time.monotonic() - start
-    logging.info("Warmup complete in %.1f seconds.", elapsed)
 
 
 def main(args: Args) -> None:
@@ -129,7 +106,7 @@ def main(args: Args) -> None:
     policy_metadata = policy.metadata
 
     config_name = args.policy.config if isinstance(args.policy, Checkpoint) else args.env.value
-    _warmup_policy(policy, config_name)
+    _policy_loading.warmup_policy(policy, config_name)
 
     if args.record:
         policy = _policy.PolicyRecorder(policy, "policy_records")

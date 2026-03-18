@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 from openpi_client import image_tools
 from openpi_client.runtime import environment as _environment
+from residual_policy.action_repr import pose10_to_pose8
 from typing_extensions import override
 
 from examples.franka import camera_client as _camera_client
@@ -21,6 +22,23 @@ if TYPE_CHECKING:
 
 
 logger = logging.getLogger(__name__)
+
+
+class CameraSafetyStop(RuntimeError):
+    """Raised when camera loss triggers a Franka evaluation safety stop."""
+
+
+def _normalize_policy_action(action: object) -> tuple[np.ndarray, np.ndarray]:
+    """Convert a canonical pose10 policy action to executable pose8."""
+    arr = np.asarray(action, dtype=np.float32)
+    if arr.ndim == 2:
+        arr = arr[0]
+
+    if arr.shape == (10,):
+        pose10 = arr.copy()
+        return pose10_to_pose8(pose10), pose10
+
+    raise ValueError(f"Expected policy action shape (10,), got {arr.shape}")
 
 
 class FrankaEnvironment(_environment.Environment):
@@ -63,6 +81,10 @@ class FrankaEnvironment(_environment.Environment):
         self._latest_control_timestamp: float | None = None
         self._teaching_mode_active: bool = False
         self._keyboard_enabled: bool = sys.stdin.isatty()
+        self._teaching_segment_id: int = -1
+        self._active_teaching_segment_id: int | None = None
+        self._active_teaching_step: int = 0
+        self._camera_failure_reason: str | None = None
         if not self._keyboard_enabled:
             logger.warning("stdin is not a TTY, keyboard teaching disabled")
 
@@ -79,6 +101,10 @@ class FrankaEnvironment(_environment.Environment):
         self._control_hz_ema = None
         self._latest_control_timestamp = None
         self._teaching_mode_active = False
+        self._teaching_segment_id = -1
+        self._active_teaching_segment_id = None
+        self._active_teaching_step = 0
+        self._camera_failure_reason = None
         logger.info("Environment reset complete")
 
     @override
@@ -102,6 +128,10 @@ class FrankaEnvironment(_environment.Environment):
         self._episode_complete = True
 
     @property
+    def camera_failure_reason(self) -> str | None:
+        return self._camera_failure_reason
+
+    @property
     def is_teaching_mode(self) -> bool:
         return self._real_env.is_teaching_mode
 
@@ -109,15 +139,45 @@ class FrankaEnvironment(_environment.Environment):
         self._real_env.enable_teaching_mode()
         self._teaching_mode_active = True
 
-    def _check_teaching_trigger(self) -> None:
-        """Check for spacebar press and trigger teaching mode."""
-        if not self._keyboard_enabled or self._teaching_mode_active:
+    def disable_teaching_mode(self) -> None:
+        self._real_env.disable_teaching_mode()
+        self._teaching_mode_active = False
+        self._active_teaching_segment_id = None
+        self._active_teaching_step = 0
+
+    def _poll_teaching_controls(self) -> None:
+        """Handle runtime keyboard controls for human correction."""
+        if not self._keyboard_enabled:
             return
         from examples.franka.keyboard_utils import check_key_pressed
 
         key = check_key_pressed()
-        if key == " ":
+        if key is None:
+            return
+        if not self._teaching_mode_active and key == " ":
             self.enable_teaching_mode()
+            self._teaching_segment_id += 1
+            self._active_teaching_segment_id = self._teaching_segment_id
+            self._active_teaching_step = 0
+            logger.info("Shared control enabled - guide robot by hand, press Space again to exit")
+            return
+        if self._teaching_mode_active and key == " ":
+            self.disable_teaching_mode()
+            logger.info("Shared control disabled - restoring normal stiffness while policy keeps running")
+
+    def _trigger_camera_safety_stop(self, reason: str) -> None:
+        if self._camera_failure_reason is None:
+            self._camera_failure_reason = reason
+            self._episode_complete = True
+            self._teaching_mode_active = False
+            self._active_teaching_segment_id = None
+            self._active_teaching_step = 0
+            try:
+                self._real_env.safety_stop_control(reason)
+            except Exception as exc:
+                logger.warning("Failed to stop robot control after camera failure: %s", exc)
+            logger.error("Camera safety stop: %s", reason)
+        raise CameraSafetyStop(self._camera_failure_reason)
 
     @override
     def get_observation(self) -> dict:
@@ -131,12 +191,19 @@ class FrankaEnvironment(_environment.Environment):
             - observation/tactile: Tactile marker3d (optional, 26x14x3)
             - prompt: Task instruction
         """
+        if self._camera_failure_reason is not None:
+            raise CameraSafetyStop(self._camera_failure_reason)
+
+        self._poll_teaching_controls()
+
         # Get robot state
         state = self._real_env.get_state()
+        tcp_velocity = self._real_env.get_tcp_velocity()
 
         # Get camera frames with markers
+        timestamp_ns = 0
         try:
-            frames, marker3d, _timestamp_ns, seq = self._camera.get_frames_with_markers()
+            frames, marker3d, timestamp_ns, seq = self._camera.get_frames_with_markers()
             l500_image = frames["l500_rgb"]
             d400_image = frames["d400_rgb"]
             if self._last_frame_seq is not None and seq == self._last_frame_seq:
@@ -147,10 +214,7 @@ class FrankaEnvironment(_environment.Environment):
                 self._stale_frame_count = 0
             self._last_frame_seq = seq
         except Exception as e:
-            logger.warning("Camera frame retrieval failed: %s, using zero images", e)
-            l500_image = np.zeros((self._render_height, self._render_width, 3), dtype=np.uint8)
-            d400_image = np.zeros((self._render_height, self._render_width, 3), dtype=np.uint8)
-            marker3d = {}
+            self._trigger_camera_safety_stop(f"Camera frame retrieval failed: {e}")
 
         # Resize images to model input size
         l500_image = image_tools.convert_to_uint8(
@@ -171,6 +235,25 @@ class FrankaEnvironment(_environment.Environment):
         tactile_data = marker3d.get("xense_1_marker3d")
         if tactile_data is not None and tactile_data.size > 0:
             obs["observation/tactile"] = tactile_data.astype(np.float32)
+
+        meta: dict[str, object] = {
+            "recording_snapshot": {
+                "frames": dict(frames),
+                "marker3d": dict(marker3d),
+                "timestamp_ns": int(timestamp_ns),
+                "seq": int(seq),
+                "state": state.copy(),
+                "tcp_velocity": tcp_velocity.copy(),
+            },
+            "is_human_teaching": bool(self._teaching_mode_active),
+        }
+        if self._teaching_mode_active:
+            segment_id = self._active_teaching_segment_id if self._active_teaching_segment_id is not None else 0
+            teaching_step = self._active_teaching_step
+            meta["teaching_segment_id"] = int(segment_id)
+            meta["teaching_step"] = int(teaching_step)
+            self._active_teaching_step += 1
+        obs["__openpi"] = meta
 
         return obs
 
@@ -205,6 +288,9 @@ class FrankaEnvironment(_environment.Environment):
             "wrench": wrench,
             "gripper": gripper,
             "action": action,
+            "teaching_segment_id": self._active_teaching_segment_id if self._teaching_mode_active else None,
+            "teaching_step": max(self._active_teaching_step - 1, 0) if self._teaching_mode_active else None,
+            "is_human_teaching": self.is_teaching_mode,
         }
 
     @override
@@ -213,15 +299,12 @@ class FrankaEnvironment(_environment.Environment):
 
         Args:
             action: Dict with "actions" key containing the action array.
-                   Shape: (action_horizon, action_dim) or (action_dim,)
+                   Shape: (action_horizon, action_dim) or (action_dim,).
+                   Franka public actions use 10D rotate6d pose10.
         """
-        self._check_teaching_trigger()
-
-        actions = np.asarray(action["actions"])
-
-        # Handle action chunk (take first action if chunked)
-        if actions.ndim == 2:
-            actions = actions[0]
+        actions, pose10 = _normalize_policy_action(action["actions"])
+        action["actions"] = pose10.copy()
+        action["actions_pose10"] = pose10.copy()
 
         action_meta = action.get("__openpi")
         control_timestamp = time.time()
@@ -260,6 +343,8 @@ class FrankaEnvironment(_environment.Environment):
                 flags.append("NEW")
             if infer_started:
                 flags.append("INFER")
+            if self._teaching_mode_active:
+                flags.append("TEACHING")
             flag_str = f" [{','.join(flags)}]" if flags else ""
 
             infer_str = ""
@@ -278,7 +363,8 @@ class FrankaEnvironment(_environment.Environment):
                 flush=True,
             )
         else:
-            print(f"[openpi] step={self._step_count} t={elapsed:.3f}s hz={hz_str}", flush=True)
+            teaching_str = " [TEACHING]" if self._teaching_mode_active else ""
+            print(f"[openpi] step={self._step_count} t={elapsed:.3f}s hz={hz_str}{teaching_str}", flush=True)
 
         executed_action = self._real_env.execute_action(actions)
         action["executed_action"] = executed_action.copy()

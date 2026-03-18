@@ -26,12 +26,47 @@ logger = logging.getLogger(__name__)
 
 # Default config file path
 _DEFAULT_CONFIG_FILE = Path(__file__).parent / "real_env_config.yaml"
+_EXECUTION_MODES = ("sync", "rtc", "cr_dagger_baseline")
 
 
 def _load_real_env_config(config_path: str | Path | None = None) -> dict[str, Any]:
     """Load real_env configuration from YAML file."""
     path = Path(config_path) if config_path else _DEFAULT_CONFIG_FILE
     return load_yaml_config(path)
+
+
+def _has_nested_key(cfg: dict[str, Any], keys: list[str]) -> bool:
+    current: Any = cfg
+    for key in keys:
+        if not isinstance(current, dict) or key not in current:
+            return False
+        current = current[key]
+    return True
+
+
+def _resolve_execution_config(cfg: dict[str, Any]) -> tuple[str | None, bool]:
+    execution_mode = get_nested(cfg, ["execution", "mode"], None)
+    legacy_rtc_enabled = bool(get_nested(cfg, ["rtc", "enabled"], False))
+    has_execution_mode = _has_nested_key(cfg, ["execution", "mode"]) and execution_mode is not None
+    has_legacy_rtc_enabled = _has_nested_key(cfg, ["rtc", "enabled"])
+
+    if execution_mode is not None and execution_mode not in _EXECUTION_MODES:
+        raise ValueError(f"Unsupported execution.mode={execution_mode!r}. Choose from {', '.join(_EXECUTION_MODES)}.")
+
+    if has_execution_mode:
+        if has_legacy_rtc_enabled:
+            logger.warning(
+                "Ignoring deprecated rtc.enabled because execution.mode=%r is set. "
+                "Remove rtc.enabled from real_env_config.yaml to avoid ambiguity.",
+                execution_mode,
+            )
+        return execution_mode, False
+
+    if legacy_rtc_enabled:
+        logger.warning('rtc.enabled is deprecated. Use execution.mode: "rtc" instead.')
+        return "rtc", False
+
+    return None, False
 
 
 @dataclass
@@ -92,6 +127,7 @@ class RealEnvConfig:
     max_episode_time: float = 30.0
     num_episodes: int = 10
     default_prompt: str = "open the can with the screwdriver"
+    record_dir: str = "eval_records"
 
     # Policy inference defaults
     policy_default_mode: str = "service"
@@ -108,11 +144,15 @@ class RealEnvConfig:
     # Motion scale for impedance control (amplify small movements to overcome stiction)
     translation_scale: float = 1.0
     rotation_scale: float = 1.0
+    residual_checkpoint_dir: str | None = None
+    residual_scale: float = 1.0
+    residual_translation_cap_m: float | None = None
+    residual_rotation_cap_rad: float | None = None
 
     # Canonical execution mode selection
     execution_mode: str | None = None
 
-    # Real-Time Chunking (RTC)
+    # Real-Time Chunking (RTC) legacy fallback for configs constructed in code
     rtc_enabled: bool = False
     rtc_inference_delay: int = 3
     rtc_execute_horizon: int = 5
@@ -138,6 +178,7 @@ class RealEnvConfig:
     def from_yaml(cls, config_path: str | Path | None = None) -> RealEnvConfig:
         """Load configuration from YAML file."""
         cfg = _load_real_env_config(config_path)
+        execution_mode, rtc_enabled = _resolve_execution_config(cfg)
 
         # Default values
         _default_ws_min = [0.2, -0.5, 0.0]
@@ -175,6 +216,7 @@ class RealEnvConfig:
             max_episode_time=get_nested(cfg, ["evaluation", "max_episode_time"], 30.0),
             num_episodes=get_nested(cfg, ["evaluation", "num_episodes"], 10),
             default_prompt=get_nested(cfg, ["evaluation", "default_prompt"], "open the can with the screwdriver"),
+            record_dir=get_nested(cfg, ["evaluation", "record_dir"], "eval_records"),
             policy_default_mode=get_nested(cfg, ["policy", "default_mode"], "service"),
             policy_remote_host=get_nested(cfg, ["policy", "remote_host"], "localhost"),
             policy_remote_port=get_nested(cfg, ["policy", "remote_port"], 8000),
@@ -184,9 +226,9 @@ class RealEnvConfig:
             teaching_load_mass=get_nested(cfg, ["teaching", "load_mass"], 0.3),
             teaching_load_com=get_nested(cfg, ["teaching", "load_com"], _default_load_com),
             teaching_load_inertia=get_nested(cfg, ["teaching", "load_inertia"], _default_load_inertia),
-            execution_mode=get_nested(cfg, ["execution", "mode"], None),
+            execution_mode=execution_mode,
             # Real-Time Chunking (RTC)
-            rtc_enabled=get_nested(cfg, ["rtc", "enabled"], False),
+            rtc_enabled=rtc_enabled,
             rtc_inference_delay=get_nested(cfg, ["rtc", "inference_delay"], 3),
             rtc_execute_horizon=get_nested(cfg, ["rtc", "execute_horizon"], 5),
             cr_dagger_execute_horizon=get_nested(cfg, ["cr_dagger", "execute_horizon"], 10),
@@ -194,6 +236,10 @@ class RealEnvConfig:
             # Motion scale
             translation_scale=get_nested(cfg, ["motion", "translation_scale"], 1.0),
             rotation_scale=get_nested(cfg, ["motion", "rotation_scale"], 1.0),
+            residual_checkpoint_dir=get_nested(cfg, ["residual", "checkpoint_dir"], None),
+            residual_scale=get_nested(cfg, ["residual", "scale"], 1.0),
+            residual_translation_cap_m=get_nested(cfg, ["residual", "translation_cap_m"], None),
+            residual_rotation_cap_rad=get_nested(cfg, ["residual", "rotation_cap_rad"], None),
         )
 
 
@@ -298,6 +344,7 @@ class FrankaRealEnv:
         self._last_sent_quaternion: np.ndarray | None = None
         self._last_target_affine: Affine | None = None
         self._last_target_action: np.ndarray | None = None
+        self._safety_stopped: bool = False
 
         _gripper_interp_duration = (
             gripper_interpolation_duration
@@ -329,12 +376,16 @@ class FrankaRealEnv:
         except Exception as exc:
             logger.warning("Failed to read EE quaternion after set_EE: %s", exc)
         self._gripper = self._robot.get_gripper()
+        self._safety_stopped = False
         logger.info("Connected to Franka robot")
 
-    def disconnect(self) -> None:
+    def disconnect(self, *, reset: bool | None = None) -> None:
         """Disconnect from the Franka robot controller."""
         if self._robot is not None:
-            if self._auto_reset_on_disconnect:
+            should_reset = self._auto_reset_on_disconnect if reset is None else reset
+            if self._safety_stopped and reset is None:
+                should_reset = False
+            if should_reset:
                 try:
                     # Ensure the robot returns to a safe reset state before disabling impedance control.
                     self.reset(grasp=False, start_control=False)
@@ -349,6 +400,7 @@ class FrankaRealEnv:
                 self._robot = None
                 self._gripper = None
                 self._gripper_thread = None
+                self._safety_stopped = False
         logger.info("Disconnected from Franka robot")
 
     def get_state(self) -> np.ndarray:
@@ -397,6 +449,8 @@ class FrankaRealEnv:
         """
         if self._robot is None:
             raise RuntimeError("Robot not connected. Call connect() first.")
+        if self._safety_stopped:
+            raise RuntimeError("Robot control is disabled after a safety stop. Reset before sending new actions.")
 
         action = np.asarray(action, dtype=np.float32)
         if action.shape != (constants.ACTION_DIM,):
@@ -791,6 +845,27 @@ class FrankaRealEnv:
         self._stop_impedance_motion()
         self._stop_waypoint_motion()
 
+    def safety_stop_control(self, reason: str | None = None) -> None:
+        """Stop active control without moving to the reset pose."""
+        if reason:
+            logger.error("Safety stop triggered: %s", reason)
+        else:
+            logger.error("Safety stop triggered")
+
+        self._teaching_mode = False
+        self._safety_stopped = True
+        self._last_target_affine = None
+        self._last_target_action = None
+
+        if self._robot is None:
+            return
+
+        try:
+            self._stop_control_motion()
+            self._robot.stop()
+        except Exception as exc:
+            logger.warning("Error stopping control during safety stop: %s", exc)
+
     @property
     def is_teaching_mode(self) -> bool:
         return self._teaching_mode
@@ -836,11 +911,32 @@ class FrankaRealEnv:
         self._teaching_mode = True
         logger.info("Teaching mode enabled - robot can be guided by hand")
 
+    def disable_teaching_mode(self) -> None:
+        """Resume regular impedance control after human teaching."""
+        if not self._teaching_mode:
+            return
+        if self._control_mode != "impedance":
+            self._teaching_mode = False
+            return
+        if self._robot is None:
+            raise RuntimeError("Robot not connected. Call connect() first.")
+
+        logger.info("Disabling teaching mode...")
+        self._stop_impedance_motion()
+        try:
+            self._start_impedance_motion()
+        except Exception as e:
+            raise RuntimeError(f"Failed to restore impedance control after teaching: {e}") from e
+
+        self._teaching_mode = False
+        logger.info("Teaching mode disabled - impedance control restored")
+
     def reset(self, grasp: bool = True, *, start_control: bool = True) -> None:
         """Reset robot to default position and optionally grasp the screwdriver."""
         if self._robot is None or self._gripper is None:
             raise RuntimeError("Robot not connected. Call connect() first.")
 
+        self._safety_stopped = False
         self._teaching_mode = False
         logger.info("Resetting robot...")
 

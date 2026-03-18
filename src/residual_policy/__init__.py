@@ -6,7 +6,10 @@ from importlib import import_module
 from typing import Any
 
 _EXPORTS: dict[str, tuple[str, str]] = {
+    "build_model_config": ("residual_policy.config", "build_model_config"),
+    "build_residual_model": ("residual_policy.model", "build_residual_model"),
     "ResidualDataset": ("residual_policy.dataset", "ResidualDataset"),
+    "CrDaggerStyleFusion": ("residual_policy.model", "CrDaggerStyleFusion"),
     "ResidualMLP": ("residual_policy.model", "ResidualMLP"),
     "ResidualModelConfig": ("residual_policy.config", "ResidualModelConfig"),
     "ResidualNormalizationStats": ("residual_policy.dataset", "ResidualNormalizationStats"),
@@ -15,10 +18,8 @@ _EXPORTS: dict[str, tuple[str, str]] = {
     "ResidualZarrData": ("residual_policy.dataset", "ResidualZarrData"),
     "build_cr_dagger_like_sample_indices": ("residual_policy.dataset", "build_cr_dagger_like_sample_indices"),
     "build_input_features": ("residual_policy.action_repr", "build_input_features"),
-    "as_pose10": ("residual_policy.action_repr", "as_pose10"),
     "canonicalize_quaternion_sign": ("residual_policy.action_repr", "canonicalize_quaternion_sign"),
     "compute_normalization_stats": ("residual_policy.dataset", "compute_normalization_stats"),
-    "decode_residual_action": ("residual_policy.action_repr", "decode_residual_action"),
     "decode_residual_pose10": ("residual_policy.action_repr", "decode_residual_pose10"),
     "FrankaPolicyPose10Wrapper": ("residual_policy.inference", "FrankaPolicyPose10Wrapper"),
     "encode_residual_action": ("residual_policy.action_repr", "encode_residual_action"),
@@ -29,6 +30,8 @@ _EXPORTS: dict[str, tuple[str, str]] = {
     "ResidualInferenceConfig": ("residual_policy.inference", "ResidualInferenceConfig"),
     "split_episode_indices": ("residual_policy.dataset", "split_episode_indices"),
     "train": ("residual_policy.trainer", "train"),
+    "XenseMarkerCNNEncoder": ("residual_policy.model", "XenseMarkerCNNEncoder"),
+    "XenseResidualMLP": ("residual_policy.model", "XenseResidualMLP"),
 }
 
 __all__ = list(_EXPORTS)

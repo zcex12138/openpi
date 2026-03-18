@@ -43,8 +43,6 @@ def test_infer_realtime_prefix_transform_maps_to_model_space_with_pre_normalize_
     franka_inputs = franka_policy.FrankaInputs(
         model_type=_model.ModelType.PI05,
         state_dim=8,
-        rotation_representation="r6d",
-        normalize_quat_sign=False,
     )
     quat_to_r6d = _transforms.QuatToRotate6d()
     delta_xyz = _transforms.DeltaActions(_transforms.make_bool_mask(3, -7))
@@ -65,17 +63,18 @@ def test_infer_realtime_prefix_transform_maps_to_model_space_with_pre_normalize_
     )
 
     obs_state = np.array([0.1, -0.2, 0.3, 0.70710677, 0.0, 0.70710677, 0.0, 0.5], dtype=np.float32)
-    action_prefix = np.array(
+    action_prefix_pose8 = np.array(
         [
             [0.2, -0.1, 0.4, 0.9238795, 0.0, 0.38268343, 0.0, 0.2],
             [0.3, 0.0, 0.5, 0.8660254, 0.0, 0.5, 0.0, 0.3],
         ],
         dtype=np.float32,
     )
+    action_prefix = quat_to_r6d({"actions": action_prefix_pose8.copy()})["actions"]
 
     state_r6d = franka_inputs(_make_obs(obs_state.copy()))["state"]
     state_r6d = quat_to_r6d({"state": state_r6d})["state"]
-    expected_prefix = quat_to_r6d({"actions": action_prefix.copy()})["actions"]
+    expected_prefix = action_prefix.copy()
     expected_prefix = delta_xyz({"state": state_r6d.copy(), "actions": expected_prefix})["actions"]
     expected_prefix = delta_r6d({"state": state_r6d.copy(), "actions": expected_prefix})["actions"]
     expected_prefix = norm({"actions": expected_prefix})["actions"]
@@ -97,7 +96,9 @@ def test_infer_realtime_prefix_transform_raises_when_dim_mismatches_model():
         "image_mask": {"cam": np.array(True)},
         "state": np.array([0.1, -0.2, 0.3, 0.70710677, 0.0, 0.70710677, 0.0, 0.5], dtype=np.float32),
     }
-    action_prefix = np.array([[0.2, -0.1, 0.4, 0.9238795, 0.0, 0.38268343, 0.0, 0.2]], dtype=np.float32)
+    action_prefix = _transforms.QuatToRotate6d()(
+        {"actions": np.array([[0.2, -0.1, 0.4, 0.9238795, 0.0, 0.38268343, 0.0, 0.2]], dtype=np.float32)}
+    )["actions"]
 
     with pytest.raises(ValueError, match="action_prefix dim mismatch"):
         policy.infer_realtime(obs, action_prefix=action_prefix)

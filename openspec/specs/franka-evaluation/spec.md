@@ -4,24 +4,18 @@
 TBD - created by archiving change add-franka-eval-script. Update Purpose after archive.
 ## Requirements
 ### Requirement: Policy Transforms
-The system SHALL support configurable rotation representation (`"quat"` or `"r6d"`) in FrankaInputs and FrankaOutputs transforms, controlled by training config.
+The system SHALL use rotate6d as the only Franka training and serving rotation representation.
 
-#### Scenario: Transform observations with rotate6d enabled
-- **WHEN** the training config has `rotation_representation="r6d"`
-- **THEN** `FrankaInputs` skips quaternion sign normalization (`normalize_quat_sign=False`)
-- **AND** `QuatToRotate6d` converts state from 7D `[xyz, qwqxqyqz]` to 9D `[xyz, r1-r6]`
-- **AND** `QuatToRotate6d` converts actions from (H, 8D) to (H, 10D) with gripper shifted from index 7 to index 9
+#### Scenario: Transform Franka observations and actions
+- **WHEN** Franka training or inference data enters the transform pipeline
+- **THEN** quaternion state/action inputs are converted to rotate6d pose tensors
+- **AND** Franka state is represented as 9D `[xyz, r1-r6]` before model padding
+- **AND** Franka actions are represented as 10D `[xyz, r1-r6, gripper]` before model padding
 
-#### Scenario: Transform model output with rotate6d enabled
-- **WHEN** the model outputs actions in 10D rotate6d format `[xyz, r1-r6, gripper]`
-- **THEN** `Rotate6dToQuat` converts actions only (not state) from (H, 10D) to (H, 8D)
-- **AND** `FrankaOutputs` extracts the first 8 dimensions as robot actions in quaternion format
-- **AND** the output quaternions are unit-normalized and sign-canonicalized
-
-#### Scenario: Transform with quaternion representation (backward compat)
-- **WHEN** the training config has `rotation_representation="quat"` (default)
-- **THEN** the transform pipeline behaves identically to the existing implementation
-- **AND** no rotate6d conversion transforms are inserted
+#### Scenario: Serve Franka model output
+- **WHEN** the Franka model outputs actions
+- **THEN** the public action format is 10D rotate6d pose `[xyz, r1-r6, gripper]`
+- **AND** the policy pipeline does not convert Franka actions back to quaternion form
 
 ### Requirement: Local Policy Loading
 The evaluation script SHALL load trained checkpoints locally using openpi's standard `policy_config.create_trained_policy()` function when remote mode is not enabled.
@@ -73,20 +67,13 @@ The evaluation script SHALL collect observations matching the training data form
 ---
 
 ### Requirement: Action Execution
-The evaluation script SHALL execute policy actions on the robot with safety constraints.
+The evaluation script SHALL execute Franka policy actions from canonical pose10 while preserving quaternion conversion only at the robot boundary.
 
-#### Scenario: Execute TCP pose action
-- **WHEN** the policy outputs an action chunk of shape `[action_horizon, 8]`
-- **THEN** each action uses the format [x, y, z, qw, qx, qy, qz, gripper]
-- **AND** the TCP position is clipped to workspace bounds
-- **AND** the TCP velocity is limited to `max_pos_speed` m/s
-- **AND** the quaternion is normalized before sending
-
-#### Scenario: Gripper control
-- **WHEN** gripper control is enabled and the policy predicts gripper > 0.7
-- **THEN** the gripper closes for that step
-
----
+#### Scenario: Execute TCP pose10 action
+- **WHEN** the Franka policy outputs an action chunk of shape `[action_horizon, 10]` or a single 10D action
+- **THEN** each action uses the format `[x, y, z, r1, r2, r3, r4, r5, r6, gripper]`
+- **AND** `examples/franka/env.py` converts that action to quaternion pose8 immediately before robot execution
+- **AND** workspace clipping, velocity limiting, and quaternion normalization still occur on the executable robot command
 
 ### Requirement: Control Loop Timing
 The evaluation script SHALL use a synchronous control loop consistent with openpi examples.
@@ -190,20 +177,13 @@ The system SHALL validate state and action dimensions at pipeline boundaries via
 - **AND** this prevents silent dimension errors from propagating to normalization or model
 
 ### Requirement: Franka Training Config with Rotate6D
-The system SHALL provide Franka training configs with `rotation_representation="r6d"` that correctly wire the transform chain.
+The system SHALL expose only rotate6d-based Franka training configs while preserving the legacy config names.
 
-#### Scenario: Config with rotate6d and relative rotation
-- **WHEN** `LeRobotFrankaDataConfigV2` is created with `rotation_representation="r6d"` and `use_relative_rotation=True`
-- **THEN** the input transform chain is: ShiftedStateToAction → SelectStateFrame → FrankaInputs → QuatToRotate6d → DeltaActions(xyz) → DeltaRotate6dActions → ValidateDims
-- **AND** the output transform chain is: AbsoluteRotate6dActions → AbsoluteActions(xyz) → Rotate6dToQuat → FrankaOutputs
-- **AND** norm stats use 10D action and 9D state dimensions
-
-#### Scenario: Norm stats dimension consistency
-- **WHEN** norm stats are computed for a rotate6d config
-- **THEN** action stats have shape `(10,)` and state stats have shape `(9,)`
-- **AND** loading 8D norm stats with a 10D config raises an error (dimension mismatch)
-
----
+#### Scenario: Legacy config names resolve to rotate6d-only implementations
+- **WHEN** the user loads `pi05_franka_cola_lora`, `pi05_franka_cola_relative_lora`, or `pi05_franka_tactile_lora`
+- **THEN** the config uses rotate6d state/action transforms internally
+- **AND** the config exposes 10D Franka actions at the policy boundary
+- **AND** no parallel `*_r6d_*` Franka config names remain available
 
 ### Requirement: Canonical Execution Mode Selection
 The Franka evaluation flow SHALL resolve a single canonical `execution.mode` before constructing any execution broker.
@@ -303,3 +283,4 @@ The CR-Dagger baseline mode SHALL work with both local and websocket-backed poli
 - **WHEN** the broker requests a new base horizon
 - **THEN** it calls the standard policy `infer()` path
 - **AND** no `infer_realtime()` support is required from the server
+

@@ -3,6 +3,7 @@
 
 import argparse
 import gc
+import inspect
 import json
 import os
 import os.path as osp
@@ -56,6 +57,8 @@ class ZarrDatasetViewer:
         self._annotations: Dict[str, Dict] = {}
         self._trajectory_ids: Optional[List[str]] = None
         self._axes_logged = set()
+        self._time_panel_supported_kwargs = self._get_time_panel_supported_kwargs()
+        self._warned_time_panel_timeline_fallback = False
 
         # Lazy load zarr (does not load data into memory)
         logger.info(f"Opening zarr dataset: {zarr_path}")
@@ -127,9 +130,15 @@ class ZarrDatasetViewer:
 
     def _validate_zarr_path(self, zarr_path: str):
         """Validate that the path is a valid zarr store"""
+        if not osp.exists(zarr_path):
+            raise FileNotFoundError(f"Zarr path '{zarr_path}' does not exist.")
         if osp.isdir(zarr_path):
-            if not osp.exists(osp.join(zarr_path, ".zgroup")):
-                raise FileNotFoundError(f"Directory '{zarr_path}' is not a Zarr store (.zgroup missing).")
+            metadata_markers = (".zgroup", ".zarray", "zarr.json")
+            if not any(osp.exists(osp.join(zarr_path, marker)) for marker in metadata_markers):
+                markers = ", ".join(metadata_markers)
+                raise FileNotFoundError(
+                    f"Directory '{zarr_path}' is not a Zarr store ({markers} all missing)."
+                )
 
     def _log_dataset_structure(self):
         """Log dataset structure without loading data"""
@@ -191,6 +200,28 @@ class ZarrDatasetViewer:
         logger.info(f"Episode lengths: {episode_lengths}")
         logger.info(f"Total frames: {self.episode_ends[-1]}")
 
+    def _get_time_panel_supported_kwargs(self) -> set[str]:
+        """Detect which TimePanel kwargs are supported by the installed rerun SDK."""
+        try:
+            return set(inspect.signature(rrb.TimePanel).parameters)
+        except (TypeError, ValueError):
+            return set()
+
+    def _make_time_panel(self):
+        """Build a TimePanel that is compatible with the installed rerun version."""
+        kwargs = {}
+        if "timeline" in self._time_panel_supported_kwargs:
+            kwargs["timeline"] = self._timeline_name
+        elif self._timeline_name != "frame" and not self._warned_time_panel_timeline_fallback:
+            logger.warning(
+                "Installed rerun does not support explicit TimePanel timeline selection; "
+                "falling back to the viewer default timeline"
+            )
+            self._warned_time_panel_timeline_fallback = True
+        if "fps" in self._time_panel_supported_kwargs:
+            kwargs["fps"] = self.fps
+        return rrb.TimePanel(**kwargs)
+
     def _get_blueprint(self):
         """Create rerun blueprint layout."""
         traj_origin = self._with_prefix("trajectory")
@@ -238,7 +269,7 @@ class ZarrDatasetViewer:
                 ),
                 column_shares=[2, 2, 3],
             ),
-            rrb.TimePanel(timeline=self._timeline_name, fps=self.fps),
+            self._make_time_panel(),
             collapse_panels=True,
         )
 
@@ -996,8 +1027,8 @@ Example:
     parser.add_argument(
         "--zarr_path",
         type=str,
-        default="data/dataset/dataset_zarr/202601_成功轨迹_汇总/replay_buffer.zarr",
-        # default="demo_records/replay_buffer.zarr",
+        # default="eval_records/20260318/replay_buffer.zarr",
+        default="eval_records/20260130/replay_buffer.zarr",
         help="Path to zarr dataset file",
     )
 

@@ -15,16 +15,18 @@ from openpi.shared.rotation import rotmat_to_quat
 import torch
 from openpi_client import base_policy as _base_policy
 
-from residual_policy.action_repr import as_pose10
+from residual_policy.config import ResidualModelConfig
+from residual_policy.config import build_model_config
 from residual_policy.action_repr import build_input_features
 from residual_policy.action_repr import canonicalize_quaternion_sign
 from residual_policy.action_repr import decode_residual_pose10
 from residual_policy.action_repr import pose8_to_pose10
-from residual_policy.action_repr import pose10_to_pose8
-from residual_policy.model import ResidualMLP
+from residual_policy.model import build_residual_model
+from residual_policy.model import get_model_kind_from_metadata
 
-_EXPECTED_STATE_DIM = 8
-_EXPECTED_ACTION_DIM = 8
+_EXPECTED_STATE_DIM = 10
+_LEGACY_STATE_DIM = 8
+_EXPECTED_ACTION_DIM = 10
 _EXPECTED_INPUT_DIM = 20
 _EXPECTED_OUTPUT_DIM = 10
 _IDENTITY_R6D = quat_to_rotate6d(np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32))
@@ -57,38 +59,44 @@ def _resolve_device(device_arg: str) -> torch.device:
     return torch.device(device_arg)
 
 
-def _extract_state8(obs: dict[str, Any]) -> np.ndarray:
+def _extract_state_pose10(obs: dict[str, Any]) -> np.ndarray:
     if "observation/state" not in obs:
         raise KeyError("Franka residual inference requires observation['observation/state']")
     state = np.asarray(obs["observation/state"], dtype=np.float32).reshape(-1)
-    if state.shape[0] < _EXPECTED_STATE_DIM:
+    if state.shape[0] < _LEGACY_STATE_DIM:
         raise ValueError(f"Expected observation/state with at least 8 dims, got {state.shape}")
-    return state[:_EXPECTED_STATE_DIM].copy()
+    return pose8_to_pose10(state[:_LEGACY_STATE_DIM])
 
 
-def _pose10_from_action(action: np.ndarray) -> np.ndarray:
-    arr = np.asarray(action, dtype=np.float32)
-    if arr.ndim == 2:
-        if arr.shape[-1] not in (_EXPECTED_ACTION_DIM, _EXPECTED_OUTPUT_DIM):
-            raise ValueError(f"Expected action chunk last dim 8 or 10, got {arr.shape}")
-        return as_pose10(arr)
-    if arr.shape[-1] not in (_EXPECTED_ACTION_DIM, _EXPECTED_OUTPUT_DIM):
-        raise ValueError(f"Expected action last dim 8 or 10, got {arr.shape}")
-    return as_pose10(arr)
+def _extract_xense_tactile(
+    obs: dict[str, Any],
+    *,
+    expected_shape: tuple[int, int, int],
+    required: bool,
+) -> np.ndarray:
+    tactile = obs.get("observation/tactile")
+    if tactile is None:
+        if required:
+            raise KeyError("Franka residual inference requires observation['observation/tactile']")
+        return np.zeros(expected_shape, dtype=np.float32)
+    arr = np.asarray(tactile, dtype=np.float32)
+    if tuple(arr.shape) != expected_shape:
+        raise ValueError(f"Expected observation/tactile shape {expected_shape}, got {arr.shape}")
+    return np.nan_to_num(arr, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32)
 
 
-def _pose8_from_action(action: np.ndarray) -> np.ndarray:
+def _canonical_pose10_action(action: np.ndarray) -> np.ndarray:
     arr = np.asarray(action, dtype=np.float32)
     if arr.ndim == 2:
         if arr.shape[-1] == _EXPECTED_ACTION_DIM:
             return arr.copy()
-        if arr.shape[-1] == _EXPECTED_OUTPUT_DIM:
-            return pose10_to_pose8(arr)
+        if arr.shape[-1] == _LEGACY_STATE_DIM:
+            return pose8_to_pose10(arr)
         raise ValueError(f"Expected action chunk last dim 8 or 10, got {arr.shape}")
     if arr.shape[-1] == _EXPECTED_ACTION_DIM:
         return arr.copy()
-    if arr.shape[-1] == _EXPECTED_OUTPUT_DIM:
-        return pose10_to_pose8(arr)
+    if arr.shape[-1] == _LEGACY_STATE_DIM:
+        return pose8_to_pose10(arr)
     raise ValueError(f"Expected action last dim 8 or 10, got {arr.shape}")
 
 
@@ -178,15 +186,17 @@ class FrankaResidualStepPolicy(_base_policy.BasePolicy):
                 f"{metadata.get('action_representation')!r}, expected 'xyz_r6d_gripper'"
             )
 
-        model_cfg = metadata.get("config", {}).get("model", {})
-        hidden_dims = tuple(int(dim) for dim in model_cfg.get("hidden_dims", ()))
-        dropout = float(model_cfg.get("dropout", 0.0))
-        self._model = ResidualMLP(
-            input_dim=_EXPECTED_INPUT_DIM,
-            output_dim=_EXPECTED_OUTPUT_DIM,
-            hidden_dims=hidden_dims,
-            dropout=dropout,
-        ).to(self._device)
+        raw_model_cfg = metadata.get("config", {}).get("model", {})
+        if isinstance(raw_model_cfg, dict):
+            raw_model_cfg = dict(raw_model_cfg)
+            raw_model_cfg.setdefault("kind", get_model_kind_from_metadata(metadata))
+            model_cfg = build_model_config(raw_model_cfg)
+        else:
+            model_cfg = ResidualModelConfig(kind=get_model_kind_from_metadata(metadata))
+        self._model_cfg = model_cfg
+        self._model = build_residual_model(model_cfg, low_dim_input_dim=_EXPECTED_INPUT_DIM, output_dim=_EXPECTED_OUTPUT_DIM).to(
+            self._device
+        )
         safetensors_torch.load_model(self._model, checkpoint_dir / "model.safetensors", device=str(self._device))
         self._model.eval()
 
@@ -203,17 +213,23 @@ class FrankaResidualStepPolicy(_base_policy.BasePolicy):
     def infer(self, obs: dict) -> dict:
         result = self._policy.infer(obs)
         base_action_raw = np.asarray(result["actions"], dtype=np.float32)
-        if base_action_raw.ndim != 1 or base_action_raw.shape[-1] not in (_EXPECTED_ACTION_DIM, _EXPECTED_OUTPUT_DIM):
+        if base_action_raw.ndim != 1 or base_action_raw.shape[-1] != _EXPECTED_ACTION_DIM:
             raise ValueError(
-                "FrankaResidualStepPolicy requires a single-step 8D/10D base action. "
+                "FrankaResidualStepPolicy requires a single-step 10D base action. "
                 f"Got shape {base_action_raw.shape}. Wrap it after the execution broker."
             )
 
-        state8 = _extract_state8(obs)
-        base_action8 = _pose8_from_action(base_action_raw)
-        base_action10 = _pose10_from_action(base_action_raw)
+        state_pose10 = _extract_state_pose10(obs)
+        base_action10 = base_action_raw.copy()
+        xense = None
+        if self._model_cfg.kind == "xense_single_step_mlp":
+            xense = _extract_xense_tactile(
+                obs,
+                expected_shape=self._model_cfg.xense_shape,
+                required=self._model_cfg.xense_required,
+            )
         start = time.perf_counter()
-        residual10 = self._predict_residual(state8, base_action10)
+        residual10 = self._predict_residual(state_pose10, base_action10, xense=xense)
         limited_residual10 = _apply_residual_limits(residual10, self._config)
         applied_residual10 = limited_residual10.copy()
         if not self._config.apply_gripper_delta:
@@ -223,7 +239,7 @@ class FrankaResidualStepPolicy(_base_policy.BasePolicy):
 
         outputs = dict(result)
         outputs["actions"] = final_pose10.astype(np.float32)
-        outputs["base_action"] = base_action8.copy()
+        outputs["base_action"] = base_action10.copy()
         outputs["base_action_pose10"] = base_action10.copy()
         outputs["residual_action_pose10"] = applied_residual10.astype(np.float32)
 
@@ -240,12 +256,24 @@ class FrankaResidualStepPolicy(_base_policy.BasePolicy):
         metadata = getattr(self._policy, "metadata", {})
         return metadata if isinstance(metadata, dict) else {}
 
-    def _predict_residual(self, state8: np.ndarray, base_action10: np.ndarray) -> np.ndarray:
-        inputs = build_input_features(state8, base_action10)
+    def _predict_residual(
+        self,
+        state_pose10: np.ndarray,
+        base_action10: np.ndarray,
+        *,
+        xense: np.ndarray | None = None,
+    ) -> np.ndarray:
+        inputs = build_input_features(state_pose10, base_action10)
         normalized_inputs = (inputs - self._input_mean) / self._input_std
         input_tensor = torch.from_numpy(normalized_inputs[None, ...]).to(self._device)
         with torch.no_grad():
-            normalized_residual = self._model(input_tensor).detach().cpu().numpy()[0]
+            if self._model_cfg.kind == "legacy_mlp":
+                normalized_residual = self._model(input_tensor).detach().cpu().numpy()[0]
+            else:
+                if xense is None:
+                    raise ValueError("xense tactile input is required for xense_single_step_mlp inference")
+                xense_tensor = torch.from_numpy(xense[None, ...]).to(self._device)
+                normalized_residual = self._model(input_tensor, xense_tensor).detach().cpu().numpy()[0]
         residual = (normalized_residual * self._target_std) + self._target_mean
         return residual.astype(np.float32)
 
@@ -271,8 +299,7 @@ class FrankaPolicyPose10Wrapper(_base_policy.BasePolicy):
         if not callable(infer_realtime):
             return self.infer(obs)
 
-        prefix = None if action_prefix is None else _pose8_from_action(action_prefix)
-        result = infer_realtime(obs, action_prefix=prefix, noise=noise)
+        result = infer_realtime(obs, action_prefix=action_prefix, noise=noise)
         return self._convert_outputs(result)
 
     def reset(self) -> None:
@@ -286,5 +313,5 @@ class FrankaPolicyPose10Wrapper(_base_policy.BasePolicy):
     @staticmethod
     def _convert_outputs(result: dict) -> dict:
         outputs = dict(result)
-        outputs["actions"] = _pose10_from_action(np.asarray(result["actions"], dtype=np.float32))
+        outputs["actions"] = _canonical_pose10_action(np.asarray(result["actions"], dtype=np.float32))
         return outputs
