@@ -40,6 +40,36 @@ def test_rotate6d_franka_configs_use_pose10_targets_without_quat_conversion(tmp_
         )
 
 
+def test_legacy_pose8_franka_relative_config_uses_pose8_targets(tmp_path) -> None:
+    train_config = _config.get_config("pi05_franka_cola_relative_pose8_lora")
+    data_config = train_config.data.create(tmp_path, train_config.model)
+
+    assert isinstance(data_config.data_transforms.inputs[0], _transforms.Rotate6dStateToQuat)
+
+    shifted_state_to_action = next(
+        transform
+        for transform in data_config.data_transforms.inputs
+        if isinstance(transform, _transforms.ShiftedStateToAction)
+    )
+    assert shifted_state_to_action.pose_dims.start == 0
+    assert shifted_state_to_action.pose_dims.stop == 8
+    assert shifted_state_to_action.normalize_quat_sign is True
+
+    franka_inputs_transform = next(
+        transform for transform in data_config.data_transforms.inputs if isinstance(transform, franka_policy.FrankaInputs)
+    )
+    assert franka_inputs_transform.state_dim == 8
+    assert franka_inputs_transform.normalize_quat_sign is True
+
+    assert not any(
+        isinstance(transform, _transforms.QuatToRotate6d) for transform in data_config.data_transforms.inputs
+    )
+    assert any(
+        isinstance(transform, franka_policy.FrankaOutputs) and transform.action_dim == 8
+        for transform in data_config.data_transforms.outputs
+    )
+
+
 def test_franka_inputs_promote_legacy_pose8_state_to_pose10() -> None:
     quat = np.array([0.9238795, 0.0, 0.38268343, 0.0], dtype=np.float32)
     legacy_state = np.concatenate(
@@ -67,3 +97,30 @@ def test_franka_inputs_promote_legacy_pose8_state_to_pose10() -> None:
         ]
     )
     np.testing.assert_allclose(result["state"], expected_pose10, atol=1e-6)
+
+
+def test_rotate6d_state_to_quat_converts_pose10_state_and_preserves_wrench() -> None:
+    quat = np.array([0.9238795, 0.0, 0.38268343, 0.0], dtype=np.float32)
+    pose10_state = np.concatenate(
+        [
+            np.array([0.1, -0.2, 0.3], dtype=np.float32),
+            quat_to_rotate6d(quat),
+            np.array([0.4], dtype=np.float32),
+            np.arange(6, dtype=np.float32),
+        ]
+    )
+
+    result = _transforms.Rotate6dStateToQuat()({"observation/state": pose10_state.copy()})
+    expected_state = np.concatenate(
+        [
+            np.array([0.1, -0.2, 0.3], dtype=np.float32),
+            quat,
+            np.array([0.4], dtype=np.float32),
+            np.arange(6, dtype=np.float32),
+        ]
+    )
+    np.testing.assert_allclose(result["observation/state"], expected_state, atol=1e-6)
+
+    pose8_state = expected_state.copy()
+    result_pose8 = _transforms.Rotate6dStateToQuat()({"observation/state": pose8_state.copy()})
+    np.testing.assert_allclose(result_pose8["observation/state"], pose8_state, atol=1e-6)

@@ -243,6 +243,43 @@ class AbsoluteActions(DataTransformFn):
 
         return data
 
+
+@dataclasses.dataclass(frozen=True)
+class Rotate6dStateToQuat(DataTransformFn):
+    """Convert rotate6d Franka state prefixes to quaternion pose8 prefixes."""
+
+    state_key: str = "observation/state"
+    r6d_start: int = 3
+    r6d_dim: int = 6
+    pose10_dim: int = 10
+    pose8_dim: int = 8
+    rotation_eps: float = 1e-6
+
+    def __call__(self, data: DataDict) -> DataDict:
+        from openpi.shared.rotation import rotate6d_to_quat
+
+        if self.state_key not in data:
+            return data
+
+        state = np.asarray(data[self.state_key])
+        raw_dim = state.shape[-1]
+        if raw_dim in (self.pose8_dim, self.pose8_dim + 6):
+            return data
+        if raw_dim not in (self.pose10_dim, self.pose10_dim + 6):
+            raise ValueError(
+                "Rotate6dStateToQuat expected Franka state dim in "
+                f"{{{self.pose8_dim}, {self.pose8_dim + 6}, {self.pose10_dim}, {self.pose10_dim + 6}}}, "
+                f"got {state.shape}"
+            )
+
+        prefix = state[..., : self.r6d_start]
+        r6d = state[..., self.r6d_start : self.r6d_start + self.r6d_dim]
+        suffix = state[..., self.r6d_start + self.r6d_dim :]
+        quat = rotate6d_to_quat(r6d, eps=self.rotation_eps)
+        data[self.state_key] = np.concatenate([prefix, quat, suffix], axis=-1).astype(np.float32)
+        return data
+
+
 @dataclasses.dataclass(frozen=True)
 class ScaleActions(DataTransformFn):
     """Scale selected action dimensions by a constant factor."""

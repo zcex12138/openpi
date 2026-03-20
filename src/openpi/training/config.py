@@ -394,6 +394,13 @@ class LeRobotFrankaDataConfig(DataConfigFactory):
     translation_dim: int = 3
     # Rotation encoding used by the dataset state/action pose prefix.
     rotation_representation: Literal["quat", "rotate6d"] = "quat"
+    # Rotation encoding stored in the source dataset state prefix. When the source
+    # dataset stores pose10 but we want to recreate a legacy pose8/quaternion
+    # training pipeline, convert state before ShiftedStateToAction.
+    source_rotation_representation: Literal["quat", "rotate6d"] | None = None
+    # Public action representation exposed by policy output transforms.
+    # Default keeps current rotate6d public Franka action format.
+    output_action_representation: Literal["quat", "rotate6d"] = "rotate6d"
 
     rotation_eps: float = 1e-6
     use_relative_rotation: bool = False
@@ -417,10 +424,17 @@ class LeRobotFrankaDataConfig(DataConfigFactory):
     @override
     def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
         using_quat_pose = self.rotation_representation == "quat"
-        canonical_action_dim = self.dataset_action_dim + 2 if using_quat_pose else self.dataset_action_dim
+        source_rotation_representation = self.source_rotation_representation or self.rotation_representation
+        emit_rotate6d_actions = using_quat_pose and self.output_action_representation == "rotate6d"
+        canonical_action_dim = self.dataset_action_dim + 2 if emit_rotate6d_actions else self.dataset_action_dim
+
+        input_transforms: list[_transforms.DataTransformFn] = []
+        if source_rotation_representation == "rotate6d" and using_quat_pose:
+            input_transforms.append(_transforms.Rotate6dStateToQuat(rotation_eps=self.rotation_eps))
 
         data_transforms = _transforms.Group(
             inputs=[
+                *input_transforms,
                 _transforms.ShiftedStateToAction(
                     state_key="observation/state",
                     action_key="actions",
@@ -441,7 +455,7 @@ class LeRobotFrankaDataConfig(DataConfigFactory):
             outputs=[franka_policy.FrankaOutputs(action_dim=canonical_action_dim)],
         )
 
-        if using_quat_pose:
+        if emit_rotate6d_actions:
             data_transforms = data_transforms.push(
                 inputs=[_transforms.QuatToRotate6d(rotation_eps=self.rotation_eps)],
             )
@@ -1035,6 +1049,50 @@ _CONFIGS = [
             default_prompt="open the can with the screwdriver",
             use_relative_translation=True,
             use_relative_rotation=True,
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("./data/checkpoints/pi05_base/params"),
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=500,
+            peak_lr=1.5e-5,
+            decay_steps=12_000,
+            decay_lr=1.0e-6,
+        ),
+        num_train_steps=6050,
+        batch_size=64,
+        num_workers=8,
+        log_interval=100,
+        save_interval=500,
+        keep_period=2000,
+        freeze_filter=pi0_config.Pi0Config(
+            pi05=True,
+            action_dim=8,
+            action_horizon=30,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+        ).get_freeze_filter(),
+        ema_decay=None,
+    ),
+    TrainConfig(
+        # Legacy pose8/quaternion relative-translation config on top of the
+        # current pose10 dataset. Used for A/B experiments against pose10.
+        name="pi05_franka_cola_relative_pose8_lora",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_horizon=30,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+        ),
+        data=LeRobotFrankaDataConfig(
+            repo_id="2026_0130_pi05_franka_cola_lerobot_v2.0",
+            base_config=DataConfig(prompt_from_task=True),
+            dataset_action_dim=8,
+            dataset_state_dim=8,
+            rotation_representation="quat",
+            source_rotation_representation="rotate6d",
+            output_action_representation="quat",
+            default_prompt="open the can with the screwdriver",
+            use_relative_translation=True,
+            use_relative_rotation=False,
         ),
         weight_loader=weight_loaders.CheckpointWeightLoader("./data/checkpoints/pi05_base/params"),
         lr_schedule=_optimizer.CosineDecaySchedule(

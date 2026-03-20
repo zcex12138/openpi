@@ -1,3 +1,4 @@
+import importlib.machinery
 import sys
 from pathlib import Path
 import types
@@ -10,22 +11,25 @@ class _StubAffine:
         pass
 
 
-sys.modules.setdefault(
-    "frankx",
-    types.SimpleNamespace(
-        Affine=_StubAffine,
-        ImpedanceMotion=object,
-        JointMotion=object,
-        MotionData=object,
-        Robot=object,
-        Waypoint=object,
-        WaypointMotion=object,
-    ),
-)
-sys.modules.setdefault("cv2", types.SimpleNamespace(destroyAllWindows=lambda: None))
+_frankx = types.ModuleType("frankx")
+_frankx.__spec__ = importlib.machinery.ModuleSpec("frankx", loader=None)
+_frankx.Affine = _StubAffine
+_frankx.ImpedanceMotion = object
+_frankx.JointMotion = object
+_frankx.MotionData = object
+_frankx.Robot = object
+_frankx.Waypoint = object
+_frankx.WaypointMotion = object
+sys.modules.setdefault("frankx", _frankx)
+
+_cv2 = types.ModuleType("cv2")
+_cv2.__spec__ = importlib.machinery.ModuleSpec("cv2", loader=None)
+_cv2.destroyAllWindows = lambda: None
+sys.modules.setdefault("cv2", _cv2)
 
 from examples.franka import main as _franka_main  # noqa: E402
 from examples.franka import real_env as _real_env  # noqa: E402
+from openpi.training import config as _train_config  # noqa: E402
 
 
 def _config(**overrides):
@@ -136,6 +140,18 @@ def test_explicit_local_checkpoint_overrides_service_default() -> None:
     assert settings.mode == "local"
     assert settings.checkpoint_dir == "/tmp/checkpoint"
     assert settings.config_name == "pi05_franka_cola_relative_lora"
+
+
+def test_legacy_pose8_policy_requires_pose10_wrapper() -> None:
+    train_cfg = _train_config.get_config("pi05_franka_cola_relative_pose8_lora")
+
+    assert _franka_main._needs_pose10_wrapper(train_cfg) is True
+
+
+def test_pose10_policy_does_not_require_pose10_wrapper() -> None:
+    train_cfg = _train_config.get_config("pi05_franka_cola_relative_lora")
+
+    assert _franka_main._needs_pose10_wrapper(train_cfg) is False
 
 
 def test_mixing_local_and_remote_policy_args_fails_fast() -> None:

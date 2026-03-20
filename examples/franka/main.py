@@ -368,8 +368,23 @@ def _maybe_wrap_with_residual(policy: object, residual_settings: ResolvedResidua
     )
 
 
-def _maybe_wrap_policy_with_pose10(policy: object, residual_settings: ResolvedResidualSettings) -> object:
-    if not residual_settings.enabled:
+def _needs_pose10_wrapper(train_cfg: object | None) -> bool:
+    if train_cfg is None:
+        return False
+    data_cfg = getattr(train_cfg, "data", None)
+    return (
+        getattr(data_cfg, "rotation_representation", None) == "quat"
+        and getattr(data_cfg, "output_action_representation", "rotate6d") == "quat"
+    )
+
+
+def _maybe_wrap_policy_with_pose10(
+    policy: object,
+    residual_settings: ResolvedResidualSettings,
+    *,
+    train_cfg: object | None = None,
+) -> object:
+    if not residual_settings.enabled and not _needs_pose10_wrapper(train_cfg):
         return policy
 
     from residual_policy.inference import FrankaPolicyPose10Wrapper
@@ -424,6 +439,7 @@ def main(args: Args) -> None:
     )
 
     # Create policy
+    cfg = None
     if policy_settings.mode == "service":
         policy = _create_remote_policy(policy_settings.remote_host or "localhost", policy_settings.remote_port or 8000)
         action_horizon = args.open_loop_horizon or 30  # Default for remote
@@ -432,7 +448,7 @@ def main(args: Args) -> None:
             raise RuntimeError("Local policy settings are incomplete")
         policy, cfg = _create_local_policy(policy_settings.checkpoint_dir, policy_settings.config_name)
         action_horizon = args.open_loop_horizon or cfg.model.action_horizon
-    policy = _maybe_wrap_policy_with_pose10(policy, residual_settings)
+    policy = _maybe_wrap_policy_with_pose10(policy, residual_settings, train_cfg=cfg)
 
     execution = _resolve_execution_settings(args, resolved_env_config, action_horizon=action_horizon)
     logger.info(
