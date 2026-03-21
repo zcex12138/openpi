@@ -5,6 +5,13 @@ import openpi.models.tokenizer as _tokenizer
 import openpi.transforms as _transforms
 
 
+def _assert_rotation_equivalent(actual: np.ndarray, expected: np.ndarray, atol: float = 1e-6) -> None:
+    actual = np.asarray(actual, dtype=np.float32)
+    expected = np.asarray(expected, dtype=np.float32)
+    dots = np.abs(np.sum(actual * expected, axis=-1))
+    assert np.allclose(dots, 1.0, atol=atol)
+
+
 def test_repack_transform():
     transform = _transforms.RepackTransform(
         structure={
@@ -60,6 +67,42 @@ def test_absolute_actions_noop():
     del item["actions"]
     transform = _transforms.AbsoluteActions(mask=[True, False])
     assert transform(item) is item
+
+
+def test_delta_quaternion_actions_and_absolute_roundtrip():
+    current_quat = np.array([0.9238795, 0.0, 0.38268343, 0.0], dtype=np.float32)
+    target_quat = np.array([0.70710677, 0.0, 0.70710677, 0.0], dtype=np.float32)
+    item = {
+        "state": np.array([0.1, -0.2, 0.3, *current_quat, 0.4], dtype=np.float32),
+        "actions": np.array([[0.2, -0.1, 0.5, *target_quat, 0.6]], dtype=np.float32),
+    }
+
+    delta = _transforms.DeltaQuaternionActions()
+    absolute = _transforms.AbsoluteQuaternionActions()
+
+    delta_item = delta({"state": item["state"].copy(), "actions": item["actions"].copy()})
+    restored = absolute({"state": item["state"].copy(), "actions": delta_item["actions"].copy()})
+
+    np.testing.assert_allclose(delta_item["actions"][0, :3], item["actions"][0, :3], atol=1e-6)
+    np.testing.assert_allclose(delta_item["actions"][0, 7:], item["actions"][0, 7:], atol=1e-6)
+    np.testing.assert_allclose(restored["actions"][0, :3], item["actions"][0, :3], atol=1e-6)
+    np.testing.assert_allclose(restored["actions"][0, 7:], item["actions"][0, 7:], atol=1e-6)
+    _assert_rotation_equivalent(restored["actions"][0, 3:7], target_quat)
+
+
+def test_delta_quaternion_actions_canonicalize_equivalent_quaternions_to_identity():
+    current_quat = np.array([0.9238795, 0.0, 0.38268343, 0.0], dtype=np.float32)
+    equivalent_target = -current_quat
+    item = {
+        "state": np.array([0.1, -0.2, 0.3, *current_quat, 0.4], dtype=np.float32),
+        "actions": np.array([[0.1, -0.2, 0.3, *equivalent_target, 0.4]], dtype=np.float32),
+    }
+
+    transformed = _transforms.DeltaQuaternionActions()(
+        {"state": item["state"].copy(), "actions": item["actions"].copy()}
+    )
+
+    np.testing.assert_allclose(transformed["actions"][0, 3:7], np.array([1.0, 0.0, 0.0, 0.0]), atol=1e-6)
 
 
 def test_make_bool_mask():

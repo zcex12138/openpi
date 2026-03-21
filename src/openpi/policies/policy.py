@@ -220,7 +220,10 @@ class Policy(BasePolicy):
                 if transformed.shape[-1] == 10:
                     continue
                 transformed = transform({"actions": transformed})["actions"]
-            elif isinstance(transform, (_transforms.DeltaActions, _transforms.DeltaRotate6dActions)):
+            elif isinstance(
+                transform,
+                (_transforms.DeltaActions, _transforms.DeltaQuaternionActions, _transforms.DeltaRotate6dActions),
+            ):
                 if prefix_state is None:
                     raise ValueError(
                         f"{type(transform).__name__} requires `state` for realtime action_prefix transform, but no "

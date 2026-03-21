@@ -421,6 +421,17 @@ class LeRobotFrankaDataConfig(DataConfigFactory):
         )
     )
 
+    def _make_relative_rotation_transforms(self) -> tuple[_transforms.DataTransformFn, _transforms.DataTransformFn]:
+        if self.rotation_representation == "quat" and self.output_action_representation == "quat":
+            return (
+                _transforms.DeltaQuaternionActions(quat_start=self.translation_dim, quat_eps=self.rotation_eps),
+                _transforms.AbsoluteQuaternionActions(quat_start=self.translation_dim, quat_eps=self.rotation_eps),
+            )
+        return (
+            _transforms.DeltaRotate6dActions(r6d_start=self.translation_dim, rotation_eps=self.rotation_eps),
+            _transforms.AbsoluteRotate6dActions(r6d_start=self.translation_dim, rotation_eps=self.rotation_eps),
+        )
+
     @override
     def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
         using_quat_pose = self.rotation_representation == "quat"
@@ -472,9 +483,10 @@ class LeRobotFrankaDataConfig(DataConfigFactory):
             )
 
         if self.use_relative_rotation:
+            delta_rotation_transform, absolute_rotation_transform = self._make_relative_rotation_transforms()
             data_transforms = data_transforms.push(
-                inputs=[_transforms.DeltaRotate6dActions(r6d_start=self.translation_dim, rotation_eps=self.rotation_eps)],
-                outputs=[_transforms.AbsoluteRotate6dActions(r6d_start=self.translation_dim, rotation_eps=self.rotation_eps)],
+                inputs=[delta_rotation_transform],
+                outputs=[absolute_rotation_transform],
             )
 
         model_transforms = ModelTransformFactory(default_prompt=self.default_prompt)(model_config)
@@ -1093,6 +1105,50 @@ _CONFIGS = [
             default_prompt="open the can with the screwdriver",
             use_relative_translation=True,
             use_relative_rotation=False,
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("./data/checkpoints/pi05_base/params"),
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=500,
+            peak_lr=1.5e-5,
+            decay_steps=12_000,
+            decay_lr=1.0e-6,
+        ),
+        num_train_steps=6050,
+        batch_size=64,
+        num_workers=8,
+        log_interval=100,
+        save_interval=500,
+        keep_period=2000,
+        freeze_filter=pi0_config.Pi0Config(
+            pi05=True,
+            action_dim=8,
+            action_horizon=30,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+        ).get_freeze_filter(),
+        ema_decay=None,
+    ),
+    TrainConfig(
+        # Legacy pose8/quaternion config with relative translation + direct
+        # quaternion relative rotation on top of the current pose10 dataset.
+        name="pi05_franka_cola_relative_rotate_pose8_lora",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_horizon=30,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+        ),
+        data=LeRobotFrankaDataConfig(
+            repo_id="2026_0130_pi05_franka_cola_lerobot_v2.0",
+            base_config=DataConfig(prompt_from_task=True),
+            dataset_action_dim=8,
+            dataset_state_dim=8,
+            rotation_representation="quat",
+            source_rotation_representation="rotate6d",
+            output_action_representation="quat",
+            default_prompt="open the can with the screwdriver",
+            use_relative_translation=True,
+            use_relative_rotation=True,
         ),
         weight_loader=weight_loaders.CheckpointWeightLoader("./data/checkpoints/pi05_base/params"),
         lr_schedule=_optimizer.CosineDecaySchedule(

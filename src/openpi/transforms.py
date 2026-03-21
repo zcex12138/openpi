@@ -299,6 +299,52 @@ class ScaleActions(DataTransformFn):
         data["actions"] = actions
         return data
 
+
+def _normalize_quaternions(quat: np.ndarray, eps: float = 1e-6) -> np.ndarray:
+    q = np.asarray(quat)
+    q64 = np.asarray(quat, dtype=np.float64)
+    norm = np.linalg.norm(q64, axis=-1, keepdims=True)
+    safe = q64 / np.maximum(norm, eps)
+    identity = np.zeros_like(safe)
+    identity[..., 0] = 1.0
+    return np.where(norm > eps, safe, identity).astype(q.dtype, copy=False)
+
+
+def _canonicalize_quaternion_sign(quat: np.ndarray) -> np.ndarray:
+    q = np.asarray(quat)
+    dominant_idx = np.argmax(np.abs(q), axis=-1)
+    dominant = np.take_along_axis(q, np.expand_dims(dominant_idx, axis=-1), axis=-1)
+    sign = np.where(dominant < 0, -1.0, 1.0).astype(q.dtype, copy=False)
+    return q * sign
+
+
+def _quat_conjugate(quat: np.ndarray) -> np.ndarray:
+    q = np.asarray(quat)
+    conjugate = q.copy()
+    conjugate[..., 1:] *= -1
+    return conjugate
+
+
+def _quat_multiply(lhs: np.ndarray, rhs: np.ndarray) -> np.ndarray:
+    q1 = np.asarray(lhs, dtype=np.float64)
+    q2 = np.asarray(rhs, dtype=np.float64)
+    out_dtype = np.result_type(lhs, rhs)
+
+    w1, x1, y1, z1 = np.moveaxis(q1, -1, 0)
+    w2, x2, y2, z2 = np.moveaxis(q2, -1, 0)
+
+    product = np.stack(
+        [
+            w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2,
+            w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2,
+            w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2,
+            w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2,
+        ],
+        axis=-1,
+    )
+    return product.astype(out_dtype, copy=False)
+
+
 @dataclasses.dataclass(frozen=True)
 class QuatToRotate6d(DataTransformFn):
     """Convert quaternion → 6D rotation in state and actions.
@@ -350,6 +396,72 @@ class Rotate6dToQuat(DataTransformFn):
         suffix = actions[..., self.r6d_start + self.r6d_dim:]
         quat = rotate6d_to_quat(r6d, eps=self.rotation_eps)
         data["actions"] = np.concatenate([prefix, quat, suffix], axis=-1)
+        return data
+
+
+@dataclasses.dataclass(frozen=True)
+class DeltaQuaternionActions(DataTransformFn):
+    """Convert absolute quaternion actions to relative quaternion rotation."""
+
+    quat_start: int = 3
+    quat_dim: int = 4
+    quat_eps: float = 1e-6
+    canonicalize_sign: bool = True
+
+    def __call__(self, data: DataDict) -> DataDict:
+        if "actions" not in data or "state" not in data:
+            return data
+
+        state, actions = data["state"], data["actions"]
+        state_quat = _normalize_quaternions(state[..., self.quat_start:self.quat_start + self.quat_dim], eps=self.quat_eps)
+        act_quat = _normalize_quaternions(actions[..., self.quat_start:self.quat_start + self.quat_dim], eps=self.quat_eps)
+
+        if self.canonicalize_sign:
+            state_quat = _canonicalize_quaternion_sign(state_quat)
+            act_quat = _canonicalize_quaternion_sign(act_quat)
+
+        delta_quat = _quat_multiply(act_quat, np.expand_dims(_quat_conjugate(state_quat), axis=-2))
+        delta_quat = _normalize_quaternions(delta_quat, eps=self.quat_eps)
+        if self.canonicalize_sign:
+            delta_quat = _canonicalize_quaternion_sign(delta_quat)
+
+        actions = actions.copy()
+        actions[..., self.quat_start:self.quat_start + self.quat_dim] = delta_quat
+        data["actions"] = actions
+        return data
+
+
+@dataclasses.dataclass(frozen=True)
+class AbsoluteQuaternionActions(DataTransformFn):
+    """Convert relative quaternion actions back to absolute quaternion rotation."""
+
+    quat_start: int = 3
+    quat_dim: int = 4
+    quat_eps: float = 1e-6
+    canonicalize_sign: bool = True
+
+    def __call__(self, data: DataDict) -> DataDict:
+        if "actions" not in data or "state" not in data:
+            return data
+
+        state, actions = data["state"], data["actions"]
+        state_quat = _normalize_quaternions(state[..., self.quat_start:self.quat_start + self.quat_dim], eps=self.quat_eps)
+        delta_quat = _normalize_quaternions(
+            actions[..., self.quat_start:self.quat_start + self.quat_dim], eps=self.quat_eps
+        )
+
+        if self.canonicalize_sign:
+            state_quat = _canonicalize_quaternion_sign(state_quat)
+            delta_quat = _canonicalize_quaternion_sign(delta_quat)
+
+        target_quat = _quat_multiply(delta_quat, np.expand_dims(state_quat, axis=-2))
+        target_quat = _normalize_quaternions(target_quat, eps=self.quat_eps)
+        if self.canonicalize_sign:
+            target_quat = _canonicalize_quaternion_sign(target_quat)
+
+        actions = actions.copy()
+        actions[..., self.quat_start:self.quat_start + self.quat_dim] = target_quat
+        data["actions"] = actions
         return data
 
 

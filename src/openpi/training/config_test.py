@@ -70,6 +70,21 @@ def test_legacy_pose8_franka_relative_config_uses_pose8_targets(tmp_path) -> Non
     )
 
 
+def test_legacy_pose8_franka_relative_rotation_uses_quaternion_transforms(tmp_path) -> None:
+    train_config = _config.get_config("pi05_franka_cola_relative_rotate_pose8_lora")
+    data_config = train_config.data.create(tmp_path, train_config.model)
+
+    assert any(
+        isinstance(transform, _transforms.DeltaQuaternionActions) for transform in data_config.data_transforms.inputs
+    )
+    assert not any(
+        isinstance(transform, _transforms.DeltaRotate6dActions) for transform in data_config.data_transforms.inputs
+    )
+    assert any(
+        isinstance(transform, _transforms.AbsoluteQuaternionActions) for transform in data_config.data_transforms.outputs
+    )
+
+
 def test_franka_inputs_promote_legacy_pose8_state_to_pose10() -> None:
     quat = np.array([0.9238795, 0.0, 0.38268343, 0.0], dtype=np.float32)
     legacy_state = np.concatenate(
